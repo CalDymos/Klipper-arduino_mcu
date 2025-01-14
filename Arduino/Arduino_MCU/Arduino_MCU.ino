@@ -3,7 +3,7 @@
 #define MCU_NAME "AIRFILTER"
 
 void setup() {
-  Serial.begin(115200); // Start serielle Kommunikation
+  Serial.begin(115200); // Start serial communication
 }
 
 bool validateChecksum(String command, int receivedChecksum) {
@@ -15,16 +15,16 @@ bool validateChecksum(String command, int receivedChecksum) {
 }
 
 void enterSleep() {
-  set_sleep_mode(SLEEP_MODE_PWR_DOWN); // Tiefster Schlafmodus
+  set_sleep_mode(SLEEP_MODE_PWR_DOWN); // Deepest sleep mode
   sleep_enable();
-  sleep_cpu(); // Schlafmodus aktivieren
-  // Der Arduino bleibt hier, bis ein Reset oder Interrupt ihn aufweckt
+  sleep_cpu(); // Activate sleep mode
+  // The Arduino remains here until a reset or interrupt wakes it up
 }
 
 void loop() {
   if (Serial.available() > 0) {
-    String input = Serial.readStringUntil('\n'); // Gesamter Befehl
-    int splitIndex = input.indexOf('*'); // Trenne Befehl und Checksumme
+    String input = Serial.readStringUntil('\n'); // Complete command
+    int splitIndex = input.indexOf('*'); // Separate command and checksum
     if (splitIndex == -1) {
       Serial.println("ERROR: NO CHECKSUM");
       return;
@@ -37,7 +37,7 @@ void loop() {
       return;
     }
 
-    // Befehl validieren und ausführen
+    // Validate and execute command
     if (command == "IDENTIFY") {
       Serial.println("MCU: " + String(MCU_NAME));
     } else if (command.startsWith("SET_LED ")) {
