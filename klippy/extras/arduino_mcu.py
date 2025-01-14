@@ -7,7 +7,7 @@ class ArduinoMCU:
         self.name = config.get_name().split()[-1]
         self.gcode = self.printer.lookup_object('gcode')
         self.port = config.get('port', '/dev/ttyUSB0') # Standardport
-        self.baudrate = config.getint('baudrate', 115200) # Standardbaudrate
+        self.baudrate = config.getint('baud', 115200) # Standardbaudrate
 
         # Serielle Verbindung einrichten
         self.serial = serial.Serial(self.port, self.baudrate, timeout=1)
