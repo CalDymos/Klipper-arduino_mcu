@@ -20,6 +20,10 @@ port:
 #   The default is /dev/ttyUSB0
 baud: 115200
 #   The baud rate to use. The default is 115200.
+timeout: 1
+#   Timout for receiving data. The default is 1.
+retries_on_timeout: 2
+#   Number of retries if a timeout has occurred. The default is 0.
 ```
 
 
