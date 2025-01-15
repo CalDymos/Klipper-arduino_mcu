@@ -5,7 +5,7 @@ extends Klipper (klippy/extra) by the possibility to communicate with an Arduino
 
 `SEND_ARDUINO TARGET=<mcu_name> COMMAND="<command>"`
 
-# example
+#### example
 `SEND_ARDUINO TARGET=airfilter COMMAND="SET_LED 128"`
 
 ## Configuration
