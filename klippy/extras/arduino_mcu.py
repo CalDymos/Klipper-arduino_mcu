@@ -1,16 +1,23 @@
 import serial
 import logging
+import time
 
 class ArduinoMCU:
     def __init__(self, config):
         self.printer = config.get_printer()
         self.name = config.get_name().split()[-1]
         self.gcode = self.printer.lookup_object('gcode')
-        self.port = config.get('port', '/dev/ttyUSB0') # deault port
-        self.baudrate = config.getint('baud', 115200) # default baudrate
+        self.port = config.get('port', '/dev/ttyUSB0') # Default port
+        self.baudrate = config.getint('baud', 115200) # Default baudrate
+        self.timeout = config.getint('timeout', 1) # Default timout
+        self.retries_on_timeout = config.getint('retries_on_timeout', 0)  # Default retries
 
         # Set up serial connection
-        self.serial = serial.Serial(self.port, self.baudrate, timeout=1)
+        try:
+            self.serial = serial.Serial(self.port, self.baudrate, timeout=self.timeout)
+            logging.info(f"Connected to {self.name} on {self.port} at {self.baudrate} baud.")
+        except serial.SerialException as e:
+            raise config.error(f"Failed to connect to {self.name} on {self.port}: {e}\n please check connection!")
 
         # Register G-code command
         self.gcode.register_command("SEND_ARDUINO", self.cmd_send_arduino)
@@ -19,9 +26,18 @@ class ArduinoMCU:
         """Calculates a simple checksum for data integrity."""
         return sum(ord(c) for c in command) % 256
 
+    def _respond_error(self, msg):
+        logging.warning(msg)
+        lines = msg.strip().split('\n')
+        if len(lines) > 1:
+            self.gcode.respond_info("\n".join(lines), log=False)
+        self.gcode.respond_raw('!! %s' % (lines[0].strip(),))
+
     def cmd_send_arduino(self, params):
         """Sends a command to the target MCU."""
         target = params.get('TARGET', '').lower()
+        if not target:
+            raise self.gcode.error("TARGET parameter is missing")
         if target != self.name:
             return  # Ignore commands not addressed to this MCU
         cmd = params.get('COMMAND', '')
@@ -33,16 +49,32 @@ class ArduinoMCU:
         full_command = f"{cmd}*{checksum}\n"  # Format: Command*Checksum
                                               # Adds a line break to ensure that the Arduino reads the input correctly
         
-        # Send and read reply
-        self.serial.write(full_command.encode())
-        response = self.serial.readline().decode().strip()
+        # clear input buffer
+        self.serial.reset_input_buffer()   
 
-        # Error handling based on the response
-        if "ERROR" in response:
-            self.gcode.respond_info(f"{self.name} Error: {response}")
-            return
-        
-        self.gcode.respond_info(f"{self.name} responded: {response}")
+        # Retry logic
+        max_attempts = self.retries_on_timeout + 1 # 1 initial attempt + retries
+
+        for attempt in range(max_attempts):
+            # Send command
+            self.serial.write(full_command.encode())
+            logging.debug(f"{self.name}: Sending command (Attempt {attempt + 1}): {full_command.strip()}")
+
+            # Wait for response
+            start_time = time.time()
+            while time.time() - start_time < self.timeout:
+                if self.serial.in_waiting > 0:  # Check if new data is available
+                    response = self.serial.readline().decode().strip()
+                    if "ERROR" in response:
+                        self._respond_error(f"{self.name} Error: {response}")
+                    else:
+                        self.gcode.respond_info(f"{self.name} responded: {response}")
+                    return
+
+            # Log timeout for this attempt
+            logging.warning(f"{self.name}: Timeout on attempt {attempt + 1}")
+            if attempt == max_attempts - 1:  # Last attempt
+                self._respond_error(f"{self.name} Error: No response after {max_attempts} attempts")
 
 def load_config_prefix(config):
     return ArduinoMCU(config)
