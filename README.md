@@ -17,7 +17,8 @@ git clone https://github.com/CalDymos/Klipper-arduino_mcu.git
 
 ## compile and flash firmware
 
-Install [Arduino IDE](https://www.arduino.cc/en/software)
+- Install [Arduino IDE](https://www.arduino.cc/en/software)
+- open `Arduino_MCU.ino`, modify, compile and upload it to mcu
 
 ## Usage
 
