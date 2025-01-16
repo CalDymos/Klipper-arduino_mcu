@@ -12,7 +12,7 @@ Clone this repository from git and run the install script:
 ```sh
 cd ~
 git clone https://github.com/CalDymos/Klipper-arduino_mcu.git
-./Klipper-arduino_mcu/install.sh
+./Klipper-arduino_mcu/klippy/extras/install.sh
 ```
 
 ## compile and flash firmware
