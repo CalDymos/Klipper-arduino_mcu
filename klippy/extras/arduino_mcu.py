@@ -12,6 +12,13 @@ class ArduinoMCU:
         self.timeout = config.getint('timeout', 1) # Default timout
         self.retries_on_timeout = config.getint('retries_on_timeout', 0)  # Default retries
 
+        # init a Virtual MCU
+        ppins = self.printer.lookup_object('pins')
+        ppins.register_chip(f"{self.name}_pin", self)
+        self._pins = {}
+        self._oid_count = 0
+        self._config_callbacks = []
+        
         # Set up serial connection
         try:
             self.serial = serial.Serial(self.port, self.baudrate, timeout=self.timeout)
@@ -22,6 +29,25 @@ class ArduinoMCU:
         # Register G-code command
         self.gcode.register_command("SEND_ARDUINO", self.cmd_send_arduino)
 
+    def setup_pin(self, pin_type, pin_params):
+        ppins = self.printer.lookup_object('pins')
+        name = pin_params['pin']
+        if name in self._pins:
+            return self._pins[name]
+        if pin_type == 'digital_out':
+            pin = None #pin = DigitalOutVirtualPin(self, pin_params)  ##TODO:add class
+        elif pin_type == 'pwm':
+            pin = None #pin = PwmVirtualPin(self, pin_params) ##TODO:add class
+        elif pin_type == 'adc':
+            pin = None #pin = AdcVirtualPin(self, pin_params) ##TODO:add class
+        elif pin_type == 'digital_in':
+            pin = None #pin = EndstopVirtualPin(self, pin_params) ##TODO:add class
+        else:
+            raise ppins.error("unable to create virtual pin of type %s" % (
+                pin_type,))
+        self._pins[name] = pin
+        return pin
+    
     def calculate_checksum(self, command):
         """Calculates a simple checksum for data integrity."""
         return sum(ord(c) for c in command) % 256
