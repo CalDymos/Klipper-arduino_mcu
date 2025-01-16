@@ -1,6 +1,6 @@
 # Klipper arduino_mcu
 [![Project Maintenance](https://img.shields.io/maintenance/yes/2024.svg)](https://github.com/CalDymos/Klipper-arduino_mcu 'GitHub Repository')
-[![License](https://img.shields.io/github/license/CalDymos/Klipper-arduino_mcu.svg)](https://github.com/CalDymos/Klipper-arduino_mcu/blob/master/LICENSE 'License')
+[![License](https://img.shields.io/github/license/CalDymos/Klipper-arduino_mcu.svg)](https://github.com/CalDymos/Klipper-arduino_mcu/blob/main/LICENSE 'License')
 
 extends Klipper (klippy/extra) by the possibility to communicate with some ATmega/ESP/SAMD/RP2040/ATtiny MCUs via the serial interface (UART), which are not directly supported by klipper. (I use it for the Arduino Nano Every)
 The firmware for the MCU can/must then be programmed in the Arduino IDE.
