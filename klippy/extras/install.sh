@@ -24,7 +24,7 @@ if [ -e "${KLIPPER_DIR}/klippy/extras/arduino_mcu.py" ]; then
 fi
 # Create a symbolic link (symlink) from 'arduino_mcu.py'
 # to the target directory ${KLIPPER_DIR}/klippy/extras.
-ln -s "${ARDUINO_MCU_DIR}/klippy/extra/arduino_mcu.py" "${KLIPPER_DIR}/klippy/extras/arduino_mcu.py"
+ln -s "${ARDUINO_MCU_DIR}/arduino_mcu.py" "${KLIPPER_DIR}/klippy/extras/arduino_mcu.py"
 
 # Check if the file 'klippy/extras/arduino_mcu.py' is already in the Git exclusion list.
 # The exclusion list is stored in the .git/info/exclude file.
