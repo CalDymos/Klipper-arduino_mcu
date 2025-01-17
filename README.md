@@ -1,6 +1,11 @@
 # Klipper arduino_mcu
+![Alpha Status](https://img.shields.io/badge/status-alpha-red)
 [![Project Maintenance](https://img.shields.io/maintenance/yes/2024.svg)](https://github.com/CalDymos/Klipper-arduino_mcu 'GitHub Repository')
 [![License](https://img.shields.io/github/license/CalDymos/Klipper-arduino_mcu.svg)](https://github.com/CalDymos/Klipper-arduino_mcu/blob/main/LICENSE 'License')
+
+
+🚧 **Alpha-Status**: This project is in the alpha phase. It is not yet stable and may change drastically.
+
 
 extends Klipper (klippy/extra) by the possibility to communicate with some ATmega/ESP/SAMD/RP2040/ATtiny MCUs via the serial interface (UART), which are not directly supported by klipper. (I use it for the Arduino Nano Every)
 The firmware for the MCU can/must then be programmed in the Arduino IDE.
@@ -36,10 +41,8 @@ port:
 #   The default is /dev/ttyUSB0
 baud: 115200
 #   The baud rate to use. The default is 115200.
-timeout: 1
-#   Timout for receiving data. The default is 1.
 retries_on_timeout: 2
-#   Number of retries if a timeout has occurred. The default is 0.
+#   Number of retries if a timeout has occurred. The default is 3.
 ```
 
 ### G-Code Command
