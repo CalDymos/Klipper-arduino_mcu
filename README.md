@@ -41,13 +41,11 @@ port:
 #   The default is /dev/ttyUSB0
 baud: 115200
 #   The baud rate to use. The default is 115200.
-retries_on_timeout: 2
-#   Number of retries if a timeout has occurred. The default is 3.
 ```
+
 
 ### G-Code Command
 
-`SEND_ARDUINO TARGET=<mcu_name> COMMAND="<command>"`
+You can use this G-code command to send commands to the Arduino_MCU. A handler must be set up on the MCU for the command.
 
-#### example
-`SEND_ARDUINO TARGET=airfilter COMMAND="SET_LED 128"`
+`SEND_ARDUINO TARGET=<mcu_name> COMMAND="<command>"`
