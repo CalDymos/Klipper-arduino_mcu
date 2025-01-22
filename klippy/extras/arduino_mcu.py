@@ -220,11 +220,11 @@ class SerialHandler:
                 self.pending_notifications[nid] = completion
                 # Calculate the waketime
                 waketime = self.reactor.monotonic() + timeout
-                logging.debug(f"waketime = {waketime}")
+
                 response = completion.wait(waketime=waketime, waketime_result=None) # wait for response
                 if response is None:
                     del self.pending_notifications[nid]  # Cleanup pending notification
-                    raise TimeoutError(f"No ACK received for: {command} / {self.reactor.monotonic()}")
+                    raise TimeoutError(f"No ACK received for: {command}")
 
                 return response
             except Exception as e:
