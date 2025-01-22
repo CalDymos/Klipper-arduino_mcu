@@ -50,7 +50,7 @@ class SerialHandler:
             # Start threads for reading and writing
             self.read_thread = threading.Thread(target=self._read_thread)
             self.write_thread = threading.Thread(target=self._write_thread)
-            self.process_incoming_thread = threading.Thread(target=self.__process_incoming_thread)
+            self.process_incoming_thread = threading.Thread(target=self._process_incoming_thread)
             self.read_thread.start()
             self.write_thread.start()
             self.process_incoming_thread.start()
@@ -192,9 +192,13 @@ class SerialHandler:
 
         Args:
             command (str): The command to send.
-            expect_ack (bool): If True, send_message waits asynchron for ACK.
+            expect_ack (bool): If True, wait asynchronously for an ACK.
+            wait_for_response (bool): If True, wait for a response using retries.
+        Returns:
+            str: The response received if `wait_for_response` is True, otherwise None.
         """
         if expect_ack:
+            timeout = 5
             try:
                 # Generate a unique ID for this message
                 self.last_notify_id += 1
@@ -214,9 +218,13 @@ class SerialHandler:
                 # Wait for an ACK response
                 completion = self.reactor.completion()
                 self.pending_notifications[nid] = completion
-                response = completion.wait()
+                # Calculate the waketime
+                waketime = self.reactor.monotonic() + timeout
+                logging.debug(f"waketime = {waketime}")
+                response = completion.wait(waketime=waketime, waketime_result=None) # wait for response
                 if response is None:
-                    raise TimeoutError(f"No ACK received for: {command}")
+                    del self.pending_notifications[nid]  # Cleanup pending notification
+                    raise TimeoutError(f"No ACK received for: {command} / {self.reactor.monotonic()}")
 
                 return response
             except Exception as e:
