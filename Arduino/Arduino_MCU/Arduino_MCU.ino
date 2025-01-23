@@ -1,6 +1,6 @@
 #include "KlipperComm.h"
 
-#define MCU_NAME "AIRFILTER"
+#define MCU_NAME "airfilter"
 #define MAX_COMMANDS 10
 
 KlipperComm klipperComm(MCU_NAME, MAX_COMMANDS);
@@ -23,7 +23,9 @@ struct PinConfig {
 Map<int, PinConfig> pinConfigurations(10);
 
 void configAnalogInHandler(const String& command) {
-  int pin = klipperComm.getParamValue(command, "PIN").toInt();
+  int pin = klipperComm.getParamValue(command, "pin").toInt();
+  int nid = klipperComm.getParamValue(command, "nid").toInt();
+
   PinConfig config;
   config.type = PIN_TYPE_AIN;
 
@@ -31,14 +33,14 @@ void configAnalogInHandler(const String& command) {
   pinMode(pin, INPUT);
 
   // Send response
-  int checksum = klipperComm.calculateChecksum("ok");
-  klipperComm.sendResponse("ok*" + String(checksum));
+  klipperComm.sendResponse("ok nid=" + String(nid));
 }
 
 void configPwmOutHandler(const String& command) {
-  int pin = klipperComm.getParamValue(command, "PIN").toInt();
-  int cycleTime = klipperComm.getParamValue(command, "CYCLE_TIME").toInt();
-  int startValue = klipperComm.getParamValue(command, "START_VALUE").toInt();
+  int pin = klipperComm.getParamValue(command, "pin").toInt();
+  int cycleTime = klipperComm.getParamValue(command, "cycle_time").toInt();
+  int startValue = klipperComm.getParamValue(command, "start_value").toInt();
+  int nid = klipperComm.getParamValue(command, "nid").toInt();
 
   PinConfig config;
   config.type = PIN_TYPE_PWM;
@@ -52,13 +54,13 @@ void configPwmOutHandler(const String& command) {
   analogWrite(pin, startValue);
 
   // Send response
-  int checksum = klipperComm.calculateChecksum("ok");
-  klipperComm.sendResponse("ok*" + String(checksum));
+  klipperComm.sendResponse("ok nid=" + String(nid));
 }
 
 void configDigitalOutHandler(const String& command) {
-  int pin = klipperComm.getParamValue(command, "PIN").toInt();
-  int invert = klipperComm.getParamValue(command, "INVERT").toInt();
+  int pin = klipperComm.getParamValue(command, "pin").toInt();
+  int invert = klipperComm.getParamValue(command, "invert").toInt();
+  int nid = klipperComm.getParamValue(command, "nid").toInt();
 
   PinConfig config;
   config.type = PIN_TYPE_DOUT;
@@ -69,13 +71,13 @@ void configDigitalOutHandler(const String& command) {
 
 
   // Send response
-  int checksum = klipperComm.calculateChecksum("ok");
-  klipperComm.sendResponse("ok*" + String(checksum));
+  klipperComm.sendResponse("ok nid=" + String(nid));
 }
 
 void configDigitalInHandler(const String& command) {
-  int pin = klipperComm.getParamValue(command, "PIN").toInt();
-  int pullUp = klipperComm.getParamValue(command, "PULL_UP").toInt();
+  int pin = klipperComm.getParamValue(command, "pin").toInt();
+  int pullUp = klipperComm.getParamValue(command, "pullup").toInt();
+  int nid = klipperComm.getParamValue(command, "nid").toInt();
 
   PinConfig config;
   config.type = PIN_TYPE_DOUT;
@@ -86,17 +88,15 @@ void configDigitalInHandler(const String& command) {
 
 
   // Send response
-  int checksum = klipperComm.calculateChecksum("ok");
-  klipperComm.sendResponse("ok*" + String(checksum));
+  klipperComm.sendResponse("ok nid=" + String(nid));
 }
 
 void setPinHandler(const String& command) {
-  int pin = klipperComm.getParamValue(command, "PIN").toInt();
-  int value = klipperComm.getParamValue(command, "VALUE").toInt();
+  int pin = klipperComm.getParamValue(command, "pin").toInt();
+  int value = klipperComm.getParamValue(command, "value").toInt();
 
   if (pinConfigurations.indexOf(pin) == pinConfigurations.getSize()) {
-    int checksum = klipperComm.calculateChecksum("error: PIN NOT CONFIGURED");
-    klipperComm.sendResponse("error: PIN NOT CONFIGURED*" + String(checksum));
+    klipperComm.sendResponse("error: pin not configured");
     return;
   }
 
@@ -111,21 +111,17 @@ void setPinHandler(const String& command) {
         analogWrite(pin, value);
         break;
     }
-
-    // Send response
-    int checksum = klipperComm.calculateChecksum("ok");
-    klipperComm.sendResponse("ok*"+ String(checksum));
 }
 
 void setup() {
     klipperComm.begin();
 
     // Register commands
-    klipperComm.registerCommand("CONFIG_ANALOG_IN", configAnalogInHandler);
-    klipperComm.registerCommand("CONFIG_PWM_OUT", configPwmOutHandler);
-    klipperComm.registerCommand("SET_PIN", setPinHandler);
-    klipperComm.registerCommand("CONFIG_DIGITAL_OUT", configDigitalOutHandler);
-    klipperComm.registerCommand("CONFIG_DIGITAL_IN", configDigitalInHandler);
+    klipperComm.registerCommand("config_analog_in", configAnalogInHandler);
+    klipperComm.registerCommand("config_pwm_out", configPwmOutHandler);
+    klipperComm.registerCommand("set_pin", setPinHandler);
+    klipperComm.registerCommand("config_digital_out", configDigitalOutHandler);
+    klipperComm.registerCommand("config_digital_in", configDigitalInHandler);
 }
 
 void loop() {

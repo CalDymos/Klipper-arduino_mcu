@@ -5,6 +5,7 @@
 #include "map.h"
 
 class KlipperComm {
+
 public:
   KlipperComm(const String& mcuName, uint8_t maxCommands);
 
@@ -12,7 +13,7 @@ public:
   bool available();
   String readCommand();
   void sendResponse(const String& response);
-  bool calculateChecksum(const String& command);
+  int calculateChecksum(const String& command);
   void handleCommand(const String& input);
 
   void registerCommand(const String& command, void (*func)(const String&));

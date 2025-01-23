@@ -6,7 +6,7 @@ import reactor
 from queue import Queue, Empty
 
 class SerialHandler:
-    def __init__(self, reactor):
+    def __init__(self, reactor, mcu_name):
         """
         Initializes the serial handler for UART communication.
 
@@ -16,7 +16,8 @@ class SerialHandler:
         self.reactor = reactor
         self.port = ''
         self.baudrate = 115200
-        
+        self._mcu_name = mcu_name
+                
         self.serial_dev = None
         self.lock = threading.Lock()
         self.response_handlers = {}  # Handlers for different message types
@@ -31,7 +32,56 @@ class SerialHandler:
 
         self.last_notify_id = 0
         self.pending_notifications = {}
+        
+        self._init_cmd = self._create_cmd("identify")
 
+    def _create_cmd(self, command):
+        """
+        Creates a properly formatted (utf-8) command with checksum and newline.
+
+        Args:
+            command (str): The base command string to send.
+
+        Returns:
+            str: The full command string with checksum and newline appended.
+        """
+        checksum = self._calculate_checksum(command)
+        full_command = f"{command}*{checksum}\n".encode('utf-8')
+        return full_command
+
+    def _is_connection_ready(self):
+        """
+        Checks if the connection is ready by attempting to read data from the serial port.
+
+        Returns:
+            bool: True if data is received, indicating the connection is ready; False otherwise.
+        """
+        try:
+
+            self.serial_dev.write(self._init_cmd)
+            logging.debug(f"Sent init command: {self._init_cmd.decode('utf-8').strip()}")
+
+            # Check if there is any data available in the serial input buffer
+            if self.serial_dev.in_waiting > 0:
+                line = self.serial_dev.readline().decode('utf-8').strip()
+                logging.debug(f"Received during readiness check: {line}")
+                
+                # Parse the message and CRC
+                if "*" in line:
+                    msg, crc = line.rsplit("*", 1)
+                    if int(crc) == int(self._calculate_checksum(msg)): 
+                        if msg == f"mcu={self._mcu_name}":
+                            self.serial_dev.read_all 
+                            return True
+
+            # No data received, connection is not ready yet
+            return False
+
+        except Exception as e:
+            # Log the error if any issue occurs during the readiness check
+            logging.error(f"Error while checking connection readiness: {e}")
+            return False
+    
     def connect(self, port, baudrate=115200):
         """Establishes a serial connection.
 
@@ -45,8 +95,22 @@ class SerialHandler:
         try:
             self.serial_dev = serial.Serial(self.port, self.baudrate, timeout=0) # Non-blocking mode
             logging.info(f"Connected to {self.port} at {self.baudrate} baud.")
-            self.running = True
 
+            # Test whether the connection is ready 
+            start_time = self.reactor.monotonic()
+            timeout = 5  # Waiting time for the connection to be ready
+
+            while self.reactor.monotonic() - start_time < timeout:
+                if self._is_connection_ready():
+                    logging.info("Serial connection is ready.")
+                    self.running = True
+                    break
+                self.reactor.pause(self.reactor.monotonic() + 0.1)  # simple dirty solutions to avoid blocking the main thread completely
+
+            if not self.running:
+                self.serial_dev.close()
+                raise TimeoutError("Connection not ready within timeout period.")
+            
             # Start threads for reading and writing
             self.read_thread = threading.Thread(target=self._read_thread)
             self.write_thread = threading.Thread(target=self._write_thread)
@@ -54,6 +118,7 @@ class SerialHandler:
             self.read_thread.start()
             self.write_thread.start()
             self.process_incoming_thread.start()
+            
         except serial.SerialException as e:
             logging.error(f"Failed to connect to {self.port}: {e}")
             raise
@@ -115,8 +180,8 @@ class SerialHandler:
                         continue
 
                     # Check for notification ID (NID)
-                    if "NID=" in msg:
-                        parts = msg.split("NID=")
+                    if "nid=" in msg:
+                        parts = msg.split("nid=")
                         if len(parts) > 1:
                             try:
                                 nid = int(parts[1])
@@ -126,11 +191,11 @@ class SerialHandler:
                                     self.reactor.async_complete(completion, line)
                                     continue
                             except ValueError:
-                                logging.error(f"Invalid NID in message: {msg}")
+                                logging.error(f"Invalid nid in message: {msg}")
                                 continue
 
-                # If no matching notification, process the message
-                self._handle_message(line)
+                    # If no matching notification, process the message
+                    self._handle_message(line)
 
             except Empty:
                 # No messages in the queue, continue
@@ -145,11 +210,9 @@ class SerialHandler:
                 # Get the next message to send
                 message = self.outgoing_queue.get(timeout=0.1)  # Non-blocking mode
                 try:
-                    checksum = self._calculate_checksum(message)
-                    full_message = f"{message}*{checksum}\n"# Format: Command*Checksum
-                                                            # Adds a line break to ensure that the Arduino reads the input correctly
-                    self.serial_dev.write(full_message.encode('utf-8'))
-                    logging.debug(f"Sent message: {full_message.strip()}")
+                    full_msg = self._create_cmd(message) 
+                    self.serial_dev.write(full_msg)
+                    logging.debug(f"Sent message: {full_msg.strip()}")
                     break
                 except Exception as e:
                     logging.error(f"Failed to send message.")
@@ -184,7 +247,7 @@ class SerialHandler:
         Returns:
             int: The calculated checksum value.
         """
-        return sum(ord(c) for c in command) % 256
+        return sum(command.encode('utf-8')) % 256
 
     def send_message(self, command, expect_ack=False, wait_for_response=False):
         """
@@ -209,11 +272,9 @@ class SerialHandler:
                 self.pending_notifications[nid] = completion
 
                 # Send the command with the notification ID
-                command = f"{command} NID={nid}"
-                checksum = self._calculate_checksum(command)
-                full_message = f"{command}*{checksum}\\n"
-                self.serial_dev.write(full_message.encode('utf-8'))
-                logging.debug(f"Sent message: {full_message.strip()}")
+                full_msg = self._create_cmd(f"{command} nid={nid}")
+                self.serial_dev.write(full_msg)
+                logging.debug(f"Sent message: {full_msg.strip()}")
 
                 # Wait for an ACK response
                 completion = self.reactor.completion()
@@ -236,10 +297,9 @@ class SerialHandler:
             retry_delay = 0.01
             while retries > 0:
                 try:
-                    checksum = self._calculate_checksum(command)
-                    full_message = f"{command}*{checksum}\n"
-                    self.serial_dev.write(full_message.encode('utf-8'))
-                    logging.debug(f"Sent message: {full_message.strip()}")
+                    full_msg = self._create_cmd(command)
+                    self.serial_dev.write(full_msg)
+                    logging.debug(f"Sent message: {full_msg.strip()}")
 
                     # Wait for a response
                     start_time = time.time()
@@ -309,14 +369,15 @@ class ArduinoMCU:
         self._config_callbacks = []
         
         # Initialize SerialHandler
-        self._serial = SerialHandler(self._reactor)
-        self.register_response("ERROR", self.handle_error)
+        self._serial = SerialHandler(self._reactor, self._name)
+        self.register_response("error", self.handle_error)
 
         # Register G-code command
         self._gcode.register_mux_command("SEND_ARDUINO", "TARGET", self._name, self.cmd_SEND_ARDUINO, desc=self.cmd_SEND_ARDUINO_help)
         
         self._config_callbacks = []
        # Register event handlers
+        self._printer.register_event_handler("klippy:firmware_restart", self._firmware_restart)
         self._printer.register_event_handler("klippy:mcu_identify", self._mcu_identify)
         self._printer.register_event_handler("klippy:connect", self._connect)
         self._printer.register_event_handler("klippy:disconnect", self._disconnect)
@@ -332,8 +393,10 @@ class ArduinoMCU:
             pin = ArduinoMCU_pwm(self, pin_params)
         elif pin_type == 'adc':
             pin = ArduinoMCU_adc(self, pin_params)
+        elif pin_type == 'endstop':
+            pin = ArduinoMCU_digital_in(self, pin_params)
         else:
-            raise ppins.error("Arduino_MCU does not support pin of type %s" % (
+            raise ppins.error("arduino_mcu does not support pin of type %s" % (
                 pin_type,))
         self._pins[name] = pin
         return pin
@@ -363,13 +426,6 @@ class ArduinoMCU:
 
     def alloc_command_queue(self):
         pass
-
-    def lookup_command(self, msgformat, cq=None):
-        return CommandWrapper()
-
-    def lookup_query_command(self, msgformat, respformat, oid=None,
-                             cq=None, is_async=False):
-        return CommandQueryWrapper(respformat, oid)
 
     def get_enumerations(self):
         return {}
@@ -426,6 +482,12 @@ class ArduinoMCU:
         self._serial.disconnect()
         logging.info(f"Disconnected from {self._name}.")
 
+    def _firmware_restart(self):
+        # Attempt reset via reset command
+        logging.info("Attempting Arduino MCU '%s' reset command", self._name)
+        self._reset_cmd.send()
+        self._reactor.pause(self._reactor.monotonic() + 0.015)
+        self._disconnect()        
     cmd_SEND_ARDUINO_help = f"Sends a command to the target arduino_mcu."
     def cmd_SEND_ARDUINO(self, gcmd):
         """Sends a command to the target MCU."""
@@ -434,7 +496,7 @@ class ArduinoMCU:
             self._respond_error("COMMAND parameter is required", True)
                 
         # Send the command to the Arduino
-        self.serial.send_message(cmd)
+        self._serial.send_message(cmd)
 
     def get_status(self, eventtime):
         return {
@@ -446,28 +508,6 @@ class ArduinoMCU:
     def handle_error(self, data):
         """Handle error messages from the Arduino."""
         self._respond_error(f"Error from Arduino: {data}")
-
-class CommandWrapper:
-    def send(self, data=(), minclock=0, reqclock=0):
-        pass
-
-    def get_command_tag(self):
-        pass
-
-class CommandQueryWrapper:
-    def __init__(self, respformat, oid):
-        entries = respformat.split()
-        self._response = {}
-        for entry in entries[1:]:
-            key, _ = entry.split('=')
-            self._response[key] = oid if key == 'oid' else 1
-
-    def send(self, data=(), minclock=0, reqclock=0):
-        return self._response
-
-    def send_with_preface(self, preface_cmd, preface_data=(), data=(),
-                          minclock=0, reqclock=0):
-        return self._response
     
 class ArduinoMCUPin:
     def __init__(self, mcu, pin_params):
@@ -496,15 +536,15 @@ class ArduinoMCU_digital_out(ArduinoMCUPin):
     def set_digital(self, print_time, value):
         """Set the pin value and send the command to Arduino MCU."""
         self._value = value
-        command = f"SET_PIN PIN={self._name} VALUE={int(value)}"
+        command = f"set_pin pin={self._name} value={int(value)}"
         self._mcu._serial.send_message(command)
-        logging.debug(f"sends to {self._mcu._name} SET_PIN PIN={self._name} VALUE={int(value)}")
+        logging.debug(f"sends to {self._mcu._name}: {command}")
 
     def _send_pin_config(self):
         """ Sends the configuration for the digital pin to the Arduino MCU """
-        command = f"CONFIG_DIGITAL_OUT PIN={self._name} PULL_UP={self._pullup} INVERT={self._invert}"
+        command = f"config_digital_out pin={self._name} pullup={self._pullup} invert={self._invert}"
         self._mcu._serial.send_message(command, True)
-        logging.debug(f"sends to {self._mcu._name} CONFIG_DIGITAL_OUT PIN={self._name} PULL_UP={self._pullup} INVERT={self._invert}")
+        logging.debug(f"sends to {self._mcu._name}: {command}")
 
     def get_status(self, eventtime):
         return {
@@ -531,15 +571,15 @@ class ArduinoMCU_pwm(ArduinoMCUPin):
         """Set the PWM value and send the command to Arduino MCU."""
         self._value = value
         cycle_time = cycle_time or self._cycle_time
-        command = f"SET_PIN PIN={self._name} VALUE={value}"
+        command = f"set_pin pin={self._name} value={value}"
         self._mcu._serial.send_message(command)
-        logging.debug(f"sends to {self._mcu._name} SET_PIN PIN={self._name} VALUE={value}")
+        logging.debug(f"sends to {self._mcu._name}: {command}")
 
     def _send_pin_config(self):
         """ Sends the configuration for the pwm pin to the Arduino MCU """
-        command = f"CONFIG_PWM_OUT PIN={self._name} CYCLE_TIME={self._cycle_time} START_VALUE={self._value}"
+        command = f"config_pwm_out pin={self._name} cycle_time={self._cycle_time} start_value={self._value}"
         self._mcu._serial.send_message(command, True)
-        logging.debug(f"sends to {self._mcu._name} CONFIG_PWM_OUT PIN={self._name} CYCLE_TIME={self._cycle_time} START_VALUE={self._value}")
+        logging.debug(f"sends to {self._mcu._name}: {command}")
 
     def get_status(self, eventtime):
         return {
@@ -590,9 +630,9 @@ class ArduinoMCU_adc(ArduinoMCUPin):
     def _send_pin_config(self):
         #logging.debug(f"{self._sample_time} / {self._sample_count} / {self._min_sample} / {self._max_sample} / {self._range_check_count}")
         """ Sends the configuration for the analog input pin to the Arduino MCU """
-        command = f"CONFIG_ANALOG_IN PIN={self._name}"
+        command = f"config_analog_in pin={self._name}"
         self._mcu._serial.send_message(command, True)
-        logging.debug(f"sends to {self._mcu._name} CONFIG_ANALOG_IN PIN={self._name}") 
+        logging.debug(f"sends to {self._mcu._name}: {command}") 
 
     def _handle_analog_in_state(self, params):
         pass
@@ -601,6 +641,36 @@ class ArduinoMCU_adc(ArduinoMCUPin):
         return {
             'value': self._value,
             'type': 'adc'
+        }
+        
+class ArduinoMCU_digital_in(ArduinoMCUPin):
+    def __init__(self, mcu, pin_params):
+        ArduinoMCUPin.__init__(self, mcu, pin_params)
+        self._steppers = []
+
+    def add_stepper(self, stepper):
+        self._steppers.append(stepper)
+
+    def query_endstop(self, print_time):
+        return self._value
+
+    def home_start(self, print_time, sample_time, sample_count, rest_time,
+                   triggered=True):
+        reactor = self._mcu.get_printer().get_reactor()
+        completion = reactor.completion()
+        completion.complete(True)
+        return completion
+
+    def home_wait(self, home_end_time):
+        return 1
+
+    def get_steppers(self):
+        return list(self._steppers)
+
+    def get_status(self, eventtime):
+        return {
+            'value': self._value,
+            'type': 'endstop'
         }
         
 def load_config_prefix(config):

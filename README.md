@@ -10,6 +10,9 @@
 extends Klipper (klippy/extra) by the possibility to communicate with some ATmega/ESP/SAMD/RP2040/ATtiny MCUs via the serial interface (UART), which are not directly supported by klipper. (I use it for the Arduino Nano Every)
 The firmware for the MCU can/must then be programmed in the Arduino IDE.
 
+arduino_mcu is intended as an extension to the main mcu, e.g. to realize a spool manager, a controller for air filters or similar.
+It is not intended to control time-critical outputs or to query time-critical inputs.
+
 ## Install
 
 Clone this repository from git and run the install script:

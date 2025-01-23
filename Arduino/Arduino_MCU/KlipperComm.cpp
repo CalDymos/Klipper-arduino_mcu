@@ -16,14 +16,17 @@ String KlipperComm::readCommand() {
 }
 
 void KlipperComm::sendResponse(const String& response) {
-  Serial.println(response);
+  int checksum = calculateChecksum(response);
+  Serial.print(response + "*" + String(checksum) + '\n');
 }
 
-bool KlipperComm::calculateChecksum(const String& command) {
+int KlipperComm::calculateChecksum(const String& command) {
   int calculatedChecksum = 0;
   for (int i = 0; i < command.length(); i++) {
     calculatedChecksum += command[i];
   }
+  // Serial.println(command);
+  // Serial.println(calculatedChecksum);
   return calculatedChecksum % 256;
 }
 
@@ -38,7 +41,7 @@ void KlipperComm::registerCommand(const String& command, void (*func)(const Stri
         return;
       }
     }
-    sendResponse("ERROR: Command list full");
+    sendResponse("error: Command list full");
   }
 }
 
@@ -53,7 +56,7 @@ String KlipperComm::getParamValue(const String& command, const String& paramName
 void KlipperComm::handleCommand(const String& input) {
   int splitIndex = input.indexOf('*');
   if (splitIndex == -1) {
-    sendResponse("ERROR: NO CHECKSUM");
+    sendResponse("error: no checksum");
     return;
   }
 
@@ -61,18 +64,28 @@ void KlipperComm::handleCommand(const String& input) {
   int checksum = input.substring(splitIndex + 1).toInt();
 
   if (checksum != calculateChecksum(command)) {
-    sendResponse("ERROR: CHECKSUM MISMATCH");
+    sendResponse("error: checksum mismatch");
     return;
   }
 
-  uint8_t index = commandMap.indexOf(command);
-  if (index < commandMap.getSize()) {
-    void (*func)(const String&) = commandMap[index].getValue();
-    if (func) {
-      func(command);
-      return;
+  if (command == "identify") {
+    // Send response
+    sendResponse("mcu=" + mcuName);
+    return;
+  } else {
+    splitIndex = input.indexOf(' ');
+    if (splitIndex != -1) {
+      String funcName = input.substring(0, splitIndex);
+        uint8_t index = commandMap.indexOf(funcName);
+      if (index < commandMap.getSize()) {
+        void (*func)(const String&) = commandMap[index].getValue();
+        if (func) {
+          func(command);
+          return;
+        }
+      }
     }
   }
 
-  sendResponse("ERROR: UNKNOWN COMMAND");
+  sendResponse("error: unknown command");
 }
