@@ -7,7 +7,8 @@
 🚧 **Alpha-Status**: This project is in the alpha phase. It is not yet stable and may change drastically.
 
 
-extends Klipper (klippy/extra) by the possibility to communicate with some ATmega/ESP/SAMD/RP2040/ATtiny MCUs via the serial interface (UART), which are not directly supported by klipper. (I use it for the Arduino Nano Every)
+extends Klipper (klippy/extra) with an alternative way to communicate with some ATmega/ESP/SAMD/RP2040/ATtiny MCUs via serial port (UART) or Ethernet
+(I use it for the Arduino Nano Every)
 The firmware for the MCU can/must then be programmed in the Arduino IDE.
 
 arduino_mcu is intended as an extension to the main mcu, e.g. to realize a spool manager, a controller for air filters or similar.
@@ -45,6 +46,7 @@ port:
 baud: 115200
 #   The baud rate to use. The default is 115200.
 ```
+
 
 
 ### G-Code Command

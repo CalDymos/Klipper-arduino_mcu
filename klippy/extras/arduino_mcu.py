@@ -4,6 +4,190 @@ import serial
 import time
 import reactor
 from queue import Queue, Empty
+import socket
+
+class EthernetHandler:
+    def __init__(self, reactor, mcu_name, host, port):
+        """
+        Initializes the Ethernet handler for TCP communication.
+
+        Args:
+            reactor (reactor): Event reactor instance (reactor.py).
+            mcu_name (str): Name of the MCU to identify.
+            host (str): IP address of the server.
+            port (int): Port number for the TCP connection.
+        """
+        self.reactor = reactor
+        self._mcu_name = mcu_name
+        self.host = host
+        self.port = port
+
+        self.socket = None
+        self.lock = threading.Lock()
+        self.response_handlers = {}
+        self.running = False
+        self.read_thread = None
+        self.write_thread = None
+        self.process_incoming_thread = None
+
+        # Queues for incoming and outgoing messages
+        self.incoming_queue = Queue()
+        self.outgoing_queue = Queue()
+
+        self.last_notify_id = 0
+        self.pending_notifications = {}
+        
+        self._init_cmd = self._create_cmd("identify")
+
+    def _create_cmd(self, command):
+        """
+        Creates a properly formatted command with checksum and newline.
+
+        Args:
+            command (str): The base command string to send.
+
+        Returns:
+            str: The full command string with checksum and newline appended.
+        """
+        checksum = self._calculate_checksum(command)
+        full_command = f"{command}*{checksum}\n".encode('utf-8')
+        return full_command
+
+    def _is_connection_ready(self):
+        """
+        Checks if the connection is ready by sending an identification command.
+
+        Returns:
+            bool: True if the connection is ready; False otherwise.
+        """
+        try:
+            self.socket.sendall(self._init_cmd)
+            logging.debug(f"Sent init command: {self._init_cmd.decode('utf-8').strip()}")
+
+            data = self.socket.recv(1024).decode('utf-8').strip()
+            if "*" in data:
+                msg, crc = data.rsplit("*", 1)
+                if int(crc) == int(self._calculate_checksum(msg)):
+                    if msg == f"mcu={self._mcu_name}":
+                        return True
+            return False
+        except Exception as e:
+            logging.error(f"Error while checking connection readiness: {e}")
+            return False
+
+    def connect(self):
+        """Establishes a TCP connection to the specified host and port."""
+        try:
+            self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self.socket.connect((self.host, self.port))
+            self.socket.settimeout(2)  # Set a timeout for socket operations
+            logging.info(f"Connected to {self.host}:{self.port}")
+
+            # Check if the connection is ready
+            if not self._is_connection_ready():
+                self.socket.close()
+                raise TimeoutError("Connection not ready.")
+
+            self.running = True
+            self.read_thread = threading.Thread(target=self._read_thread)
+            self.write_thread = threading.Thread(target=self._write_thread)
+            self.process_incoming_thread = threading.Thread(target=self._process_incoming_thread)
+            self.read_thread.start()
+            self.write_thread.start()
+            self.process_incoming_thread.start()
+
+        except Exception as e:
+            logging.error(f"Failed to connect to {self.host}:{self.port}: {e}")
+            raise
+
+    def disconnect(self):
+        """Closes the Ethernet connection."""
+        self.running = False
+        if self.read_thread:
+            self.read_thread.join()
+        if self.write_thread:
+            self.write_thread.join()
+        if self.process_incoming_thread:
+            self.process_incoming_thread.join()
+        if self.socket:
+            self.socket.close()
+            self.socket = None
+        logging.info("Ethernet connection closed.")
+
+    def _read_thread(self):
+        """Reads data from the Ethernet socket and puts it into the incoming queue."""
+        while self.running:
+            try:
+                data = self.socket.recv(1024).decode('utf-8').strip()
+                if data:
+                    logging.debug(f"Received raw message: {data}")
+                    self.incoming_queue.put(data)
+            except socket.timeout:
+                continue
+            except Exception as e:
+                logging.error(f"Error reading from socket: {e}")
+                self.running = False
+
+    def _process_incoming_thread(self):
+        """Processes messages from the incoming queue."""
+        while self.running:
+            try:
+                line = self.incoming_queue.get(timeout=0.1)
+                logging.debug(f"Processing message: {line}")
+
+                if "*" in line:
+                    msg, crc = line.rsplit("*", 1)
+                    if int(crc) == self._calculate_checksum(msg):
+                        self._handle_message(msg)
+                    else:
+                        logging.error(f"CRC mismatch for message: {msg}")
+            except Empty:
+                pass
+            except Exception as e:
+                logging.error(f"Error processing message: {e}")
+
+    def _write_thread(self):
+        """Sends data from the outgoing queue over the Ethernet connection."""
+        while self.running:
+            try:
+                message = self.outgoing_queue.get(timeout=0.1)
+                full_msg = self._create_cmd(message)
+                self.socket.sendall(full_msg)
+                logging.debug(f"Sent message: {full_msg.strip()}")
+            except Empty:
+                pass
+            except Exception as e:
+                logging.error(f"Error sending message: {e}")
+
+    def _handle_message(self, message):
+        """Processes incoming messages and dispatches them to the appropriate handler."""
+        logging.debug(f"Received message: {message}")
+        with self.lock:
+            parts = message.split(' ', 1)
+            cmd = parts[0]
+            data = parts[1] if len(parts) > 1 else ""
+
+            handler = self.response_handlers.get(cmd, self._default_handler)
+            handler(data)
+
+    def _calculate_checksum(self, command):
+        """Calculates a simple checksum for data integrity."""
+        return sum(command.encode('utf-8')) % 256
+
+    def send_message(self, command):
+        """Sends a command over the Ethernet connection."""
+        self.outgoing_queue.put(command)
+        logging.debug(f"Queued message: {command}")
+
+    def register_response(self, handler, command):
+        """Registers a handler for a specific command."""
+        with self.lock:
+            self.response_handlers[command] = handler
+
+    def _default_handler(self, data):
+        """Default handler for unrecognized commands."""
+        logging.warning(f"Unhandled command: {data}")
+
 
 class SerialHandler:
     def __init__(self, reactor, mcu_name):
@@ -71,7 +255,8 @@ class SerialHandler:
                     msg, crc = line.rsplit("*", 1)
                     if int(crc) == int(self._calculate_checksum(msg)): 
                         if msg == f"mcu={self._mcu_name}":
-                            self.serial_dev.read_all 
+                            self.reactor.pause(self.reactor.monotonic() + 0.1)
+                            self.serial_dev.reset_input_buffer()  # clear buffer
                             return True
 
             # No data received, connection is not ready yet
@@ -137,6 +322,16 @@ class SerialHandler:
             self.serial_dev = None
         logging.info("Serial connection closed.")
 
+    # Temporärer Logger mit Zeitstempel
+    def _log_debug(self, message):
+        if logging.getLogger().level == logging.DEBUG:
+            current_time = time.time()
+            local_time = time.localtime(current_time)
+            milliseconds = int((current_time - int(current_time)) * 1000)
+            timestamp = time.strftime('%Y-%m-%d %H:%M:%S', local_time)
+            logging.debug(f"{timestamp}.{milliseconds} {message}")
+
+
     def _read_thread(self):
         """
         Reads serial data and stores it in the incoming queue.
@@ -146,7 +341,7 @@ class SerialHandler:
                 if self.serial_dev.in_waiting > 0:
                     # Read a line from the serial device
                     line = self.serial_dev.readline().decode('utf-8').strip()
-                    logging.debug(f"Received raw message: {line}")
+                    self._log_debug(f"Received raw message: {line}")
                     
                     # Store the line in the incoming queue
                     self.incoming_queue.put(line)
@@ -163,7 +358,7 @@ class SerialHandler:
             try:
                 # Get the next message from the incoming queue
                 line = self.incoming_queue.get(timeout=0.1)  # Wait for a message
-                logging.debug(f"Processing message: {line}")
+                self._log_debug(f"Processing message: {line}")
 
                 # Parse the message and CRC
                 if "*" in line:
@@ -212,7 +407,7 @@ class SerialHandler:
                 try:
                     full_msg = self._create_cmd(message) 
                     self.serial_dev.write(full_msg)
-                    logging.debug(f"Sent message: {full_msg.strip()}")
+                    self._log_debug(f"Sent message: {full_msg.strip()}")
                     break
                 except Exception as e:
                     logging.error(f"Failed to send message.")
@@ -227,7 +422,7 @@ class SerialHandler:
         Args:
             message (str): The received message.
         """
-        logging.debug(f"Received message: {message}")
+        self._log_debug(f"Received message: {message}")
         with self.lock:
             parts = message.split(' ', 1)
             cmd = parts[0]
@@ -274,7 +469,7 @@ class SerialHandler:
                 # Send the command with the notification ID
                 full_msg = self._create_cmd(f"{command} nid={nid}")
                 self.serial_dev.write(full_msg)
-                logging.debug(f"Sent message: {full_msg.strip()}")
+                self._log_debug(f"Sent message: {full_msg.strip()}")
 
                 # Wait for an ACK response
                 completion = self.reactor.completion()
@@ -299,7 +494,7 @@ class SerialHandler:
                 try:
                     full_msg = self._create_cmd(command)
                     self.serial_dev.write(full_msg)
-                    logging.debug(f"Sent message: {full_msg.strip()}")
+                    self._log_debug(f"Sent message: {full_msg.strip()}")
 
                     # Wait for a response
                     start_time = time.time()
@@ -307,7 +502,7 @@ class SerialHandler:
                         try:
                             response = self.incoming_queue.get(timeout=retry_delay)
                             if response:
-                                logging.debug(f"Response received: {response}")
+                                self._log_debug(f"Response received: {response}")
                                 return response
                         except Empty:
                             pass
@@ -326,15 +521,15 @@ class SerialHandler:
         else:
             # Send message without ACK, over queue
             self.outgoing_queue.put(command)
-            logging.debug(f"Queued message: {command}")
+            self._log_debug(f"Queued message: {command}")
 
-    def register_response(self, command, handler, oid=None):
+    def register_response(self, handler, command, oid=None):
         """
         Registers a handler for a specific command.
 
         Args:
-            command (str): The command to handle.
             handler (callable): The function to handle the command.
+            command (str): The command to handle.
         """
         with self.lock:
             self.response_handlers[command] = handler
@@ -358,7 +553,11 @@ class ArduinoMCU:
         self._baudrate = config.getint('baud', 115200) # Default baudrate
         self._debuglevel = config.get('debug', False)
         if self._debuglevel:
-            logging.getLogger().setLevel(logging.DEBUG) #  generally activates the debug mode for logging
+            logging.getLogger().setLevel(logging.DEBUG) 
+
+        # Store captured configuration commands for buttons
+        self._button_config_commands = []  # List to track button configuration commands
+        self._buttons_config_complete = False  # Flag to indicate when config is ready
 
         # init Arduino MCU
         ppins = self._printer.lookup_object('pins')
@@ -370,7 +569,7 @@ class ArduinoMCU:
         
         # Initialize SerialHandler
         self._serial = SerialHandler(self._reactor, self._name)
-        self.register_response("error", self.handle_error)
+        self.register_response(self.handle_error, "error")
 
         # Register G-code command
         self._gcode.register_mux_command("SEND_ARDUINO", "TARGET", self._name, self.cmd_SEND_ARDUINO, desc=self.cmd_SEND_ARDUINO_help)
@@ -385,6 +584,7 @@ class ArduinoMCU:
     def setup_pin(self, pin_type, pin_params):
         ppins = self._printer.lookup_object('pins')
         name = pin_params['pin']
+        logging.debug(f"setup_pin for pin_type: {pin_type}")
         if name in self._pins:
             return self._pins[name]
         if pin_type == 'digital_out':
@@ -393,8 +593,6 @@ class ArduinoMCU:
             pin = ArduinoMCU_pwm(self, pin_params)
         elif pin_type == 'adc':
             pin = ArduinoMCU_adc(self, pin_params)
-        elif pin_type == 'endstop':
-            pin = ArduinoMCU_digital_in(self, pin_params)
         else:
             raise ppins.error("arduino_mcu does not support pin of type %s" % (
                 pin_type,))
@@ -409,8 +607,50 @@ class ArduinoMCU:
         logging.debug(f"Registering config callback: {cb}")
         self._config_callbacks.append(cb)
 
+    def _send_buttons_config(self):
+        """
+        Sends all captured button configuration commands to the Arduino MCU.
+        """
+        if not self._buttons_config_complete:
+            logging.warning("Button configuration is not yet complete.")
+            return
+
+        logging.debug("Sending button configuration commands to Arduino MCU...")
+        for cmd in self._button_config_commands:
+            # Parse button_count from command
+            parts = cmd.split()
+            params = {}
+            for part in parts:
+                if "=" in part:
+                    key, value = part.split("=")
+                    params[key] = value
+           
+            if cmd.startswith("buttons_add"):
+                # Extracted parameters
+                oid = int(params.get("oid", 0))
+                pos = int(params.get("pos", 0))
+                pin = params.get("pin", "")
+                pull_up = int(params.get("pull_up", 0))
+                command = f"config_digital_in oid={oid} pos={pos} pin={pin} pullup={pull_up}"
+                self._serial.send_message(command, True)                 
+
+        # Clear the list after sending
+        self._button_config_commands.clear()
+        self._buttons_config_complete = False  # Reset the flag
+        
     def add_config_cmd(self, cmd, is_init=False, on_restart=False):
-        pass
+        """
+        Overridden method to capture all button-related configuration commands.
+        """
+        logging.debug(f"Captured config command: {cmd}")
+        # Store commands related to buttons
+        if cmd.startswith("config_buttons") or cmd.startswith("buttons_add") or cmd.startswith("buttons_query"):
+            self._button_config_commands.append(cmd)
+
+        # Check if the final command ("buttons_query") is captured
+        if cmd.startswith("buttons_query"):
+            self._buttons_config_complete = True
+            self._send_buttons_config()
 
     def get_query_slot(self, oid):
         return 0
@@ -421,12 +661,25 @@ class ArduinoMCU:
     def get_printer(self):
         return self._printer
 
-    def register_response(self, command, handler, oid=None):
-        self._serial.register_response(command, handler, oid)
+    def register_response(self, handler, command, oid=None):
+        logging.debug(f"Registering response handler: {command}")
+        # Check if we need to replace the 'button_state' handler with the custom one
+        if command == "buttons_state":
+            # Replace with custom handler
+            self._serial.register_response(self._handle_buttons_state, command, oid)
+        else:    
+            self._serial.register_response(handler, command, oid)
 
     def alloc_command_queue(self):
         pass
 
+    def lookup_command(self, msgformat, cq=None):
+        pass
+
+    def lookup_query_command(self, msgformat, respformat, oid=None,
+                             cq=None, is_async=False):
+        pass
+    
     def get_enumerations(self):
         return {}
 
@@ -441,6 +694,9 @@ class ArduinoMCU:
 
     def request_move_queue_slot(self):
         pass
+
+    def _handle_buttons_state(self, params):
+        logging.debug("custom handle_button_state")
 
     def _mcu_identify(self):
 
@@ -485,9 +741,10 @@ class ArduinoMCU:
     def _firmware_restart(self):
         # Attempt reset via reset command
         logging.info("Attempting Arduino MCU '%s' reset command", self._name)
-        self._reset_cmd.send()
+        self._serial.send_message("restart")
         self._reactor.pause(self._reactor.monotonic() + 0.015)
-        self._disconnect()        
+        self._disconnect()
+
     cmd_SEND_ARDUINO_help = f"Sends a command to the target arduino_mcu."
     def cmd_SEND_ARDUINO(self, gcmd):
         """Sends a command to the target MCU."""
@@ -508,7 +765,7 @@ class ArduinoMCU:
     def handle_error(self, data):
         """Handle error messages from the Arduino."""
         self._respond_error(f"Error from Arduino: {data}")
-    
+        
 class ArduinoMCUPin:
     def __init__(self, mcu, pin_params):
         self._mcu = mcu
@@ -642,36 +899,6 @@ class ArduinoMCU_adc(ArduinoMCUPin):
             'value': self._value,
             'type': 'adc'
         }
-        
-class ArduinoMCU_digital_in(ArduinoMCUPin):
-    def __init__(self, mcu, pin_params):
-        ArduinoMCUPin.__init__(self, mcu, pin_params)
-        self._steppers = []
-
-    def add_stepper(self, stepper):
-        self._steppers.append(stepper)
-
-    def query_endstop(self, print_time):
-        return self._value
-
-    def home_start(self, print_time, sample_time, sample_count, rest_time,
-                   triggered=True):
-        reactor = self._mcu.get_printer().get_reactor()
-        completion = reactor.completion()
-        completion.complete(True)
-        return completion
-
-    def home_wait(self, home_end_time):
-        return 1
-
-    def get_steppers(self):
-        return list(self._steppers)
-
-    def get_status(self, eventtime):
-        return {
-            'value': self._value,
-            'type': 'endstop'
-        }
-        
+                
 def load_config_prefix(config):
     return ArduinoMCU(config)
