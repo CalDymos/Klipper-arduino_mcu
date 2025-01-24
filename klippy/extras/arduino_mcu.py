@@ -426,6 +426,8 @@ class SerialHandler:
         with self.lock:
             parts = message.split(' ', 1)
             cmd = parts[0]
+            if cmd.endswith(":"):
+                cmd = cmd[:-1]
             data = parts[1] if len(parts) > 1 else ""
 
             # Check for registered command handlers
