@@ -16,17 +16,21 @@
 
 class KlipperComm {
 private:
-    const String mcuName;                             // Name der MCU
+    String mcuName;                                   // Name of MCU
     Map<String, void (*)(const String&)> commandMap;  // Map for command callbacks
 
 #ifdef USE_WIFI
-    WiFiClient client;                                // WiFiClient für die Netzwerkkommunikation
-    String serverIP;                                  // IP-Adresse des Servers
-    uint16_t serverPort;                              // Portnummer des Servers
-    String commandBuffer;                             // Puffer für empfangene Daten
+    WiFiClient client;                                // WiFi client for network communicatio
+    IPAddress serverIP;                               // IP address of the Klipper server
+    uint16_t serverPort;                              // Port number for Arduino_mcu on the klipper server
+    IPAddress local_IP;                               // static IP of MCU
+    IPAddress gateway;                                // 
+    IPAddress subnet;                                 //
+    String ssid;
+    String password;
 
     bool connectToServer() {
-        if (client.connect(serverIP.c_str(), serverPort)) {
+        if (client.connect(serverIP, serverPort)) {
             return true;
         } else {
             return false;
@@ -35,9 +39,13 @@ private:
 #endif
 
 #ifdef USE_LAN
-    EthernetClient client;                            // EthernetClient für die LAN-Kommunikation
-    IPAddress serverIP;                               // IP-Adresse des Servers
-    uint16_t serverPort;                              // Portnummer des Servers
+    EthernetClient client;                            // Ethernet client for LAN communication
+    IPAddress serverIP;                               // IP address of the Klipper server
+    uint16_t serverPort;                              // Port number for Arduino_mcu on the klipper server
+    IPAddress local_IP;                               // static IP of MCU
+    byte mac[6];                                      //
+    IPAddress gateway;                                //
+    IPAddress subnet;                                 //
 
     bool connectToServer() {
         if (client.connect(serverIP, serverPort)) {
@@ -49,16 +57,17 @@ private:
 #endif
 
 public:
-#ifdef USE_SERIAL
-    KlipperComm(const String& mcuName)
-        : mcuName(mcuName), commandBuffer("") {}
+    KlipperComm(const String& mcuName, uint8_t maxCommands)
+        : mcuName(mcuName), commandMap(maxCommands) {}
+
+#if !defined(USE_LAN) && !defined(USE_WIFI)
 
     void begin(unsigned long baudRate = 115200) {
         Serial.begin(baudRate);
     }
 
     bool available() {
-        return Serial.available() > 0;
+        return Serial.available();
     }
 
     String readCommand() {
@@ -72,12 +81,30 @@ public:
 #endif
 
 #ifdef USE_WIFI
-    KlipperComm(const String& mcuName, const String& ip, uint16_t port)
-        : mcuName(mcuName), serverIP(ip), serverPort(port) {}
 
-    void begin(const char* ssid, const char* password) {
+    void begin(const String& serverIP, uint16_t serverPort, const char* ssid, const char* password, const String& local_IP, const String& gateway, const String& subnet) {
+        if (!this->serverIP.fromString(serverIP))
+          Serial.println("invalid klipper server IP adress");
+
+        this->serverPort = serverPort;
+
+        if (!this->local_IP.fromString(local_IP))
+          Serial.println("invalid MCU IP adress");
+        
+        if (!this->gateway.fromString(gateway))
+          Serial.println("invalid gateway IP adress");
+        
+        if (!this->subnet.fromString(subnet))
+          Serial.println("invalid subnet mask IP adress");
+
+        this->ssid = ssid;
+        this->password = password;
+
+        if (!WiFi.config(this->local_IP, this->gateway, this->subnet)) {
+          Serial.println("Error when configuring the static IP address");
+        }
         if (WiFi.status() != WL_CONNECTED) {
-            WiFi.begin(ssid, password);
+            WiFi.begin(this->ssid, this->password);
         }
 
         if (WiFi.waitForConnectResult() == WL_CONNECTED) {
@@ -100,11 +127,25 @@ public:
 #endif
 
 #ifdef USE_LAN
-    KlipperComm(const String& mcuName, IPAddress ip, uint16_t port)
-        : mcuName(mcuName), serverIP(ip), serverPort(port) {}
 
-    void begin(byte* mac) {
-        Ethernet.begin(mac);
+    void begin(const String& serverIP, uint16_t serverPort, byte* mac, const String& local_IP, const String& gateway, const String& subnet) {
+        if (!this->serverIP.fromString(serverIP))
+          Serial.println("invalid klipper server IP adress");
+
+        this->serverPort = serverPort;
+
+        if (!this->local_IP.fromString(local_IP))
+          Serial.println("invalid MCU IP adress");
+        
+        if (!this->gateway.fromString(gateway))
+          Serial.println("invalid gateway IP adress");
+        
+        if (!this->subnet.fromString(subnet))
+          Serial.println("invalid subnet mask IP adress");
+        
+        for (int i = 0; i < 6; i++) this->mac[i] = mac[i];
+
+        Ethernet.begin(this->mac, this->local_IP, this->gateway, this->gateway, this->subnet);
         connectToServer();
     }
 
@@ -147,7 +188,7 @@ public:
 
     String getParamValue(const String& command, const String& paramName) {
         int start = command.indexOf(paramName + "=");
-        if (start == -1) return "";  // Parameter nicht gefunden
+        if (start == -1) return "";  // Parameter not found
         int end = command.indexOf(' ', start);
         if (end == -1) end = command.length();
         return command.substring(start + paramName.length() + 1, end);
