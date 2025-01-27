@@ -7,7 +7,7 @@
 🚧 **Alpha-Status**: This project is in the alpha phase. It is not yet stable and may change drastically.
 
 
-extends Klipper (klippy/extra) with an alternative way to communicate with some ATmega/ESP/SAMD/RP2040/ATtiny MCUs via serial port (UART) or Ethernet
+extends Klipper (klippy/extra) with an alternative way to communicate with some ATmega/ESP/SAMD/RP2040/ATtiny MCUs via serial port (UART) or Network
 (I use it for the Arduino Nano Every)
 The firmware for the MCU can/must then be programmed in the Arduino IDE.
 
@@ -37,14 +37,22 @@ First, add an `[arduino_mcu mcu_name]` section to your `printer.cfg` to define t
 
 ```ini
 [arduino_mcu mcu_name]
+comm:
+#   Communication type between the Klipper extension and the MCU
+#   lan = communicate over Ethernet/Wifi
+#   serial = communicate over UART (default)
+ip:
+#   server ip address (default use current system IP)
 port:
-#   The serial port to connect to the MCU. If unsure (or if it
-#   changes) use
+#   TCP/IP port if communication type 'lan' is set
+#   else the serial port to connect to the MCU. If unsure (or if it changes) use
 #   ls /dev/tty*
-#   This shows a list of all serial devices. Common ports for the Arduino Nano are e.g. /dev/ttyUSB0 or /dev/ttyACM0.
+#   This shows a list of all serial devices. 
+#   Common ports for the Arduino Nano are e.g. /dev/ttyUSB0 or /dev/ttyACM0.
 #   The default is /dev/ttyUSB0
 baud: 115200
-#   The baud rate to use. The default is 115200.
+#   The baud rate to use. The default is 115200. 
+#   Only need on communication type 'serial'.
 ```
 
 

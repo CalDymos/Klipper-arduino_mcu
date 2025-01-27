@@ -9,7 +9,7 @@
 #include <WiFiClient.h>
 #endif
 
-#ifdef USE_LAN
+#ifdef USE_ETHERNET
 #include <Ethernet.h>
 #include <EthernetClient.h>
 #endif
@@ -38,7 +38,7 @@ private:
     }
 #endif
 
-#ifdef USE_LAN
+#ifdef USE_ETHERNET
     EthernetClient client;                            // Ethernet client for LAN communication
     IPAddress serverIP;                               // IP address of the Klipper server
     uint16_t serverPort;                              // Port number for Arduino_mcu on the klipper server
@@ -60,7 +60,7 @@ public:
     KlipperComm(const String& mcuName, uint8_t maxCommands)
         : mcuName(mcuName), commandMap(maxCommands) {}
 
-#if !defined(USE_LAN) && !defined(USE_WIFI)
+#if !defined(USE_ETHERNET) && !defined(USE_WIFI)
 
     void begin(unsigned long baudRate = 115200) {
         Serial.begin(baudRate);
@@ -126,7 +126,7 @@ public:
     }
 #endif
 
-#ifdef USE_LAN
+#ifdef USE_ETHERNET
 
     void begin(const String& serverIP, uint16_t serverPort, byte* mac, const String& local_IP, const String& gateway, const String& subnet) {
         if (!this->serverIP.fromString(serverIP))

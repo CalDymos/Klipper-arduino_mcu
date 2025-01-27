@@ -6,23 +6,29 @@ import reactor
 from queue import Queue, Empty
 import socket
 
-class EthernetHandler:
-    def __init__(self, reactor, mcu_name, host, port):
+class NetworkHandler:
+    def __init__(self, reactor, mcu_name, hostIp=None, port=45800):
         """
-        Initializes the Ethernet handler for TCP communication.
+        Initializes the Network handler for TCP communication.
 
         Args:
             reactor (reactor): Event reactor instance (reactor.py).
             mcu_name (str): Name of the MCU to identify.
-            host (str): IP address of the server.
-            port (int): Port number for the TCP connection.
+            hostIp (str): IP address to bind the server. (default: current IP)
+            port (int): Port number for the server to listen on. (default: 45800)
         """
         self.reactor = reactor
         self._mcu_name = mcu_name
-        self.host = host
-        self.port = port
+        
+        # Get the current IP if hostIp is not specified
+        self.hostIp = hostIp or self._get_local_ip()
+		
+        # Validate and set the port
+        self.port = self._validate_port(port)
 
-        self.socket = None
+        self.server_socket = None
+        self.client_socket = None
+        self.client_address = None
         self.lock = threading.Lock()
         self.response_handlers = {}
         self.running = False
@@ -38,7 +44,34 @@ class EthernetHandler:
         self.pending_notifications = {}
         
         self._init_cmd = self._create_cmd("identify")
+        
+    def _get_local_ip(self):
+        """Gets the local IP address of the current machine."""
+        try:
+            return socket.gethostbyname(socket.gethostname())
+        except Exception as e:
+            logging.error(f"Failed to get local IP address: {e}")
+            return "127.0.0.1"
 
+    def _validate_port(self, port):
+        """
+        Validates the port to ensure it does not conflict with common services.
+
+        Args:
+            port (int): The requested port number.
+
+        Returns:
+            int: A valid port number.
+        """
+        # List of standard ports to avoid
+        reserved_ports = {1883, 5000, 7125, 8080, 8819, 8883}
+
+        if port in reserved_ports or port < 1024 or port > 65535:
+            logging.warning(f"Port {port} is reserved or invalid. Assigning a random free port.")
+            return 45800  # use default Port
+
+        return port
+    
     def _create_cmd(self, command):
         """
         Creates a properly formatted command with checksum and newline.
@@ -53,6 +86,10 @@ class EthernetHandler:
         full_command = f"{command}*{checksum}\n".encode('utf-8')
         return full_command
 
+    def _calculate_checksum(self, command):
+        """Calculates a simple checksum for data integrity."""
+        return sum(command.encode('utf-8')) % 256
+    
     def _is_connection_ready(self):
         """
         Checks if the connection is ready by sending an identification command.
@@ -61,10 +98,10 @@ class EthernetHandler:
             bool: True if the connection is ready; False otherwise.
         """
         try:
-            self.socket.sendall(self._init_cmd)
+            self.client_socket.sendall(self._init_cmd)
             logging.debug(f"Sent init command: {self._init_cmd.decode('utf-8').strip()}")
 
-            data = self.socket.recv(1024).decode('utf-8').strip()
+            data = self.client_socket.recv(1024).decode('utf-8').strip()
             if "*" in data:
                 msg, crc = data.rsplit("*", 1)
                 if int(crc) == int(self._calculate_checksum(msg)):
@@ -76,19 +113,25 @@ class EthernetHandler:
             return False
 
     def connect(self):
-        """Establishes a TCP connection to the specified host and port."""
+        """Starts the TCP server and listens for incoming connections."""
         try:
-            self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            self.socket.connect((self.host, self.port))
-            self.socket.settimeout(2)  # Set a timeout for socket operations
-            logging.info(f"Connected to {self.host}:{self.port}")
+            self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self.server_socket.bind((self.hostIp, self.port))
+            self.server_socket.listen(1)  # Accept one client at a time
+            logging.info(f"Server started on {self.hostIp}:{self.port}")
 
-            # Check if the connection is ready
+            # Accept a client connection
+            self.client_socket, self.client_address = self.server_socket.accept()
+            logging.info(f"Client connected from {self.client_address}")
+            
+            # Check if the connection is ready and the MCU identifies itself correctly
             if not self._is_connection_ready():
-                self.socket.close()
+                self.client_socket.close()
                 raise TimeoutError("Connection not ready.")
 
             self.running = True
+            
+            # Start threads for communication            
             self.read_thread = threading.Thread(target=self._read_thread)
             self.write_thread = threading.Thread(target=self._write_thread)
             self.process_incoming_thread = threading.Thread(target=self._process_incoming_thread)
@@ -97,11 +140,11 @@ class EthernetHandler:
             self.process_incoming_thread.start()
 
         except Exception as e:
-            logging.error(f"Failed to connect to {self.host}:{self.port}: {e}")
+            logging.error(f"Failed to start server: {e}")
             raise
 
     def disconnect(self):
-        """Closes the Ethernet connection."""
+        """Stops the server and disconnects the client."""
         self.running = False
         if self.read_thread:
             self.read_thread.join()
@@ -109,16 +152,19 @@ class EthernetHandler:
             self.write_thread.join()
         if self.process_incoming_thread:
             self.process_incoming_thread.join()
-        if self.socket:
-            self.socket.close()
-            self.socket = None
-        logging.info("Ethernet connection closed.")
+        if self.client_socket:
+            self.client_socket.close()
+            self.client_socket = None
+        if self.server_socket:
+            self.server_socket.close()
+            self.server_socket = None
+        logging.info("Server stopped.")
 
     def _read_thread(self):
-        """Reads data from the Ethernet socket and puts it into the incoming queue."""
+        """Reads data from the network socket and puts it into the incoming queue."""
         while self.running:
             try:
-                data = self.socket.recv(1024).decode('utf-8').strip()
+                data = self.client_socket.recv(1024).decode('utf-8').strip()
                 if data:
                     logging.debug(f"Received raw message: {data}")
                     self.incoming_queue.put(data)
@@ -147,12 +193,12 @@ class EthernetHandler:
                 logging.error(f"Error processing message: {e}")
 
     def _write_thread(self):
-        """Sends data from the outgoing queue over the Ethernet connection."""
+        """Sends data from the outgoing queue over the network connection."""
         while self.running:
             try:
                 message = self.outgoing_queue.get(timeout=0.1)
                 full_msg = self._create_cmd(message)
-                self.socket.sendall(full_msg)
+                self.client_socket.sendall(full_msg)
                 logging.debug(f"Sent message: {full_msg.strip()}")
             except Empty:
                 pass
@@ -170,12 +216,8 @@ class EthernetHandler:
             handler = self.response_handlers.get(cmd, self._default_handler)
             handler(data)
 
-    def _calculate_checksum(self, command):
-        """Calculates a simple checksum for data integrity."""
-        return sum(command.encode('utf-8')) % 256
-
     def send_message(self, command):
-        """Sends a command over the Ethernet connection."""
+        """Sends a command over the network connection."""
         self.outgoing_queue.put(command)
         logging.debug(f"Queued message: {command}")
 
@@ -551,8 +593,14 @@ class ArduinoMCU:
         self._reactor = self._printer.get_reactor()
         self._name = config.get_name().split()[-1]
         self._gcode = self._printer.lookup_object('gcode')
-        self._port = config.get('port', '/dev/ttyUSB0') # Default port
-        self._baudrate = config.getint('baud', 115200) # Default baudrate
+        self._commType = config.get('comm', 'serial')
+        if self._commType == 'lan':
+            self._port = config.getint('port', 0) # Default port for network communication
+            self._ip = config.get('ip', None)
+        else:
+            self._commType = 'serial'
+            self._port = config.get('port', '/dev/ttyUSB0') # Default port for serial
+            self._baudrate = config.getint('baud', 115200) # Default baudrate
         self._debuglevel = config.get('debug', False)
         if self._debuglevel:
             logging.getLogger().setLevel(logging.DEBUG) 
@@ -569,8 +617,11 @@ class ArduinoMCU:
         self._oid_count = 0
         self._config_callbacks = []
         
-        # Initialize SerialHandler
-        self._serial = SerialHandler(self._reactor, self._name)
+        # Initialize communication
+        if self._commType == 'serial':
+            self._comm = SerialHandler(self._reactor, self._name)
+        elif self._commType == 'lan':
+            self._comm = NetworkHandler(self._reactor, self._name, self._ip, self._port)
         self.register_response(self.handle_error, "error")
 
         # Register G-code command
@@ -634,7 +685,7 @@ class ArduinoMCU:
                 pin = params.get("pin", "")
                 pull_up = int(params.get("pull_up", 0))
                 command = f"config_digital_in oid={oid} pos={pos} pin={pin} pullup={pull_up}"
-                self._serial.send_message(command, True)                 
+                self._comm.send_message(command, True)                 
 
         # Clear the list after sending
         self._button_config_commands.clear()
@@ -668,9 +719,9 @@ class ArduinoMCU:
         # Check if we need to replace the 'button_state' handler with the custom one
         if command == "buttons_state":
             # Replace with custom handler
-            self._serial.register_response(self._handle_buttons_state, command, oid)
+            self._comm.register_response(self._handle_buttons_state, command, oid)
         else:    
-            self._serial.register_response(handler, command, oid)
+            self._comm.register_response(handler, command, oid)
 
     def alloc_command_queue(self):
         pass
@@ -704,7 +755,7 @@ class ArduinoMCU:
 
         logging.info(f"Establishing {self._name} connection...")
         try:
-            self._serial.connect(self._port, self._baudrate)
+            self._comm.connect(self._port, self._baudrate)
             logging.info(f"Connected to Arduino on {self._port}.")
         except Exception as e:
             self._respond_error(f"Failed to connect to Arduino: {e}\n check the connection to the MCU ", True)
@@ -730,20 +781,20 @@ class ArduinoMCU:
             raise RuntimeError(msg)  # Trigger RuntimeError exception
 
     def _connect(self):
-        """Connect to the Arduino using SerialHandler."""
+        """Connect to the Arduino"""
         for cb in self._config_callbacks:
             cb()
 
     def _disconnect(self):
         """Disconnect from the Arduino."""
         logging.info(f"Closing {self._name} connection...")
-        self._serial.disconnect()
+        self._comm.disconnect()
         logging.info(f"Disconnected from {self._name}.")
 
     def _firmware_restart(self):
         # Attempt reset via reset command
         logging.info("Attempting Arduino MCU '%s' reset command", self._name)
-        self._serial.send_message("restart")
+        self._comm.send_message("restart")
         self._reactor.pause(self._reactor.monotonic() + 0.015)
         self._disconnect()
 
@@ -755,7 +806,7 @@ class ArduinoMCU:
             self._respond_error("COMMAND parameter is required", True)
                 
         # Send the command to the Arduino
-        self._serial.send_message(cmd)
+        self._comm.send_message(cmd)
 
     def get_status(self, eventtime):
         return {
@@ -796,13 +847,13 @@ class ArduinoMCU_digital_out(ArduinoMCUPin):
         """Set the pin value and send the command to Arduino MCU."""
         self._value = value
         command = f"set_pin pin={self._name} value={int(value)}"
-        self._mcu._serial.send_message(command)
+        self._mcu._comm.send_message(command)
         logging.debug(f"sends to {self._mcu._name}: {command}")
 
     def _send_pin_config(self):
         """ Sends the configuration for the digital pin to the Arduino MCU """
         command = f"config_digital_out pin={self._name} pullup={self._pullup} invert={self._invert}"
-        self._mcu._serial.send_message(command, True)
+        self._mcu._comm.send_message(command, True)
         logging.debug(f"sends to {self._mcu._name}: {command}")
 
     def get_status(self, eventtime):
@@ -831,13 +882,13 @@ class ArduinoMCU_pwm(ArduinoMCUPin):
         self._value = value
         cycle_time = cycle_time or self._cycle_time
         command = f"set_pin pin={self._name} value={value}"
-        self._mcu._serial.send_message(command)
+        self._mcu._comm.send_message(command)
         logging.debug(f"sends to {self._mcu._name}: {command}")
 
     def _send_pin_config(self):
         """ Sends the configuration for the pwm pin to the Arduino MCU """
         command = f"config_pwm_out pin={self._name} cycle_time={self._cycle_time} start_value={self._value}"
-        self._mcu._serial.send_message(command, True)
+        self._mcu._comm.send_message(command, True)
         logging.debug(f"sends to {self._mcu._name}: {command}")
 
     def get_status(self, eventtime):
@@ -890,7 +941,7 @@ class ArduinoMCU_adc(ArduinoMCUPin):
         #logging.debug(f"{self._sample_time} / {self._sample_count} / {self._min_sample} / {self._max_sample} / {self._range_check_count}")
         """ Sends the configuration for the analog input pin to the Arduino MCU """
         command = f"config_analog_in pin={self._name}"
-        self._mcu._serial.send_message(command, True)
+        self._mcu._comm.send_message(command, True)
         logging.debug(f"sends to {self._mcu._name}: {command}") 
 
     def _handle_analog_in_state(self, params):

@@ -1,24 +1,27 @@
 // #define USE_WIFI
-// #define USE_LAN
+// #define USE_ETHERNET
 #include "KlipperComm.h"
 
-#define MCU_NAME "airfilter"
-#define MAX_COMMANDS 10
+#define MCU_NAME "airfilter"        // mcu name
+#define MAX_COMMANDS 10             // max mcu commands
 
-#if defined(USE_LAN) || defined(USE_WIFI)
+// is only required for communication via LAN or WLAN
+//***************************************************
+#if defined(USE_ETHERNET) || defined(USE_WIFI)
 #define SERVER_IP "192.6.1.124"     // <- Klipper server IP adress 
 #define SERVER_PORT 45800           // <- port for Arduino_mcu 
 #define LOCAL_IP "192.6.1.123"      // ip adress for MCU in LAN
 #define GATEWAY "192.6.1.1"         // Gateway for LAN
 #define SUBNET_MASK "225.255.255.0" // subnet mask for LAN
 #endif
-#ifdef USE_LAN
+#ifdef USE_ETHERNET
 #define MAC_ADDR { 0xDE, 0xAD, 0xBE, 0xEF, 0xFE, 0xED } // mac adress for MCU
 #endif
 #ifdef USE_WIFI
 #define SSID "<ssid>"                                   // ssid for WLAN
 #define PWD "<password>"                                // password for WLAN
 #endif
+//***************************************************
 
 KlipperComm klipperComm(MCU_NAME, MAX_COMMANDS);
 
@@ -40,7 +43,7 @@ struct PinConfig {
 };
 
 
-// Map for pin configurations 9736 Bytes
+// Map for pin configurations
 Map<int, PinConfig> pinConfigurations(10);
 
 void configurePin(const String& command, int type) {
@@ -118,7 +121,7 @@ void sendPeriodicUpdates() {
 }
 
 void setup() {
-  #if defined(USE_LAN)
+  #if defined(USE_ETHERNET)
   byte mac[] = MAC_ADDR;
   klipperComm.begin(SERVER_IP, SERVER_PORT, mac, LOCAL_IP, GATEWAY, SUBNET_MASK);
   #elif defined(USE_WIFI)
