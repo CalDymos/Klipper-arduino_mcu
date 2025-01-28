@@ -601,6 +601,12 @@ class ArduinoMCU:
             self._commType = 'serial'
             self._port = config.get('port', '/dev/ttyUSB0') # Default port for serial
             self._baudrate = config.getint('baud', 115200) # Default baudrate
+            
+        # vars for mcu stats
+        self._mcu_version = "Unknown"
+        self._mcu_freq = 0
+        self._mcu_chip = 'Unknown'       
+        
         self._debuglevel = config.get('debug', False)
         if self._debuglevel:
             logging.getLogger().setLevel(logging.DEBUG) 
@@ -757,16 +763,41 @@ class ArduinoMCU:
         try:
             self._comm.connect(self._port, self._baudrate)
             logging.info(f"Connected to Arduino on {self._port}.")
+
+            # register Arduino_mcu as 'mcu' to show it in SystemLoad panel
+            mcu_name = 'mcu ' + self._name
+            self._printer.add_object(mcu_name, self)
+            
         except Exception as e:
             self._respond_error(f"Failed to connect to Arduino: {e}\n check the connection to the MCU ", True)
 
     def get_status(self, eventtime):
-        return {
+        status = {
+            'mcu_version': self._mcu_version,
+            #'mcu_build_versions': 'gcc: 10.2.1 binutils: 2.35.2',
+            'mcu_constants': {
+                'CLOCK_FREQ': self._mcu_freq,
+                'MCU': self._mcu_chip,
+                #'ADC_MAX': 1023,
+                #'PWM_MAX': 255,
+            },
+            'last_stats': {
+            #    'mcu_awake': 1,
+            #    'mcu_task_avg': 0.0001,
+            #    'mcu_task_stddev': 0.0001,
+            #    'bytes_write': 5000,
+            #    'bytes_read': 6000,
+            #    'bytes_retransmit': 0,
+            #    'bytes_invalid': 0,
+                'freq': self._mcu_freq,
+            },
             'pins': {
-                name : pin.get_status(eventtime)
+                name: pin.get_status(eventtime)
                     for name, pin in self._pins.items()
             }
         }
+        #logging.debug(f"get_status() is called {status}")
+        return status
     
     def _respond_error(self, msg, exception=False):
         """
@@ -807,13 +838,6 @@ class ArduinoMCU:
                 
         # Send the command to the Arduino
         self._comm.send_message(cmd)
-
-    def get_status(self, eventtime):
-        return {
-            'name': self._name,
-            'port': self._port,
-            'baudrate': self._baudrate,
-        }
     
     def handle_error(self, data):
         """Handle error messages from the Arduino."""

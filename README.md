@@ -8,7 +8,6 @@
 
 
 extends Klipper (klippy/extra) with an alternative way to communicate with some ATmega/ESP/SAMD/RP2040/ATtiny MCUs via serial port (UART) or Network
-(I use it for the Arduino Nano Every)
 The firmware for the MCU can/must then be programmed in the Arduino IDE.
 
 arduino_mcu is intended as an extension to the main mcu, e.g. to realize a spool manager, a controller for air filters or similar.
@@ -42,9 +41,10 @@ comm:
 #   lan = communicate over Ethernet/Wifi
 #   serial = communicate over UART (default)
 ip:
-#   server ip address (default use current system IP)
+#   server ip address (default is current system IP)
+#   is only required if communication type is set to 'lan'
 port:
-#   TCP/IP port if communication type 'lan' is set
+#   TCP/IP port if communication type is set to 'lan' (default is 45800),
 #   else the serial port to connect to the MCU. If unsure (or if it changes) use
 #   ls /dev/tty*
 #   This shows a list of all serial devices. 
@@ -52,10 +52,12 @@ port:
 #   The default is /dev/ttyUSB0
 baud: 115200
 #   The baud rate to use. The default is 115200. 
-#   Only need on communication type 'serial'.
+#   Only need if communication type is 'serial'.
 ```
 
+The following configuration sections for inputs and outputs are supported
 
+`[output_pin]`, `[gcode_button]`, `[temperatur_sensor]`, `[]
 
 ### G-Code Command
 
