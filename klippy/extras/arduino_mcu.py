@@ -1,37 +1,45 @@
 import logging
 import threading
-import serial
-import time
-import reactor
+import serial, socket
+import time, reactor
 from queue import Queue, Empty
-import socket
+from abc import ABC, abstractmethod
 
-class NetworkHandler:
-    def __init__(self, reactor, mcu_name, hostIp=None, port=45800):
+class logger:
+    """helper class for timestamped debug logging."""
+
+    @staticmethod
+    def _log_debug(message):
         """
-        Initializes the Network handler for TCP communication.
+        Logs a debug message with a timestamp.
 
         Args:
-            reactor (reactor): Event reactor instance (reactor.py).
+            message (str): The message to log.
+        """
+        if logging.getLogger().level == logging.DEBUG:
+            current_time = time.time()
+            local_time = time.localtime(current_time)
+            milliseconds = int((current_time - int(current_time)) * 1000)
+            timestamp = time.strftime('%Y-%m-%d %H:%M:%S', local_time)
+            logging.debug(f"{timestamp}.{milliseconds} {message}")
+
+class CommunicationHandler(ABC):
+    def __init__(self, reactor, mcu_name):
+        """
+        Base class for communication handlers.
+
+        Args:
+            reactor (reactor): Event reactor instance.
             mcu_name (str): Name of the MCU to identify.
-            hostIp (str): IP address to bind the server. (default: current IP)
-            port (int): Port number for the server to listen on. (default: 45800)
         """
         self.reactor = reactor
         self._mcu_name = mcu_name
-        
-        # Get the current IP if hostIp is not specified
-        self.hostIp = hostIp or self._get_local_ip()
-		
-        # Validate and set the port
-        self.port = self._validate_port(port)
 
-        self.server_socket = None
-        self.client_socket = None
-        self.client_address = None
         self.lock = threading.Lock()
         self.response_handlers = {}
         self.running = False
+
+        # Threads
         self.read_thread = None
         self.write_thread = None
         self.process_incoming_thread = None
@@ -42,36 +50,9 @@ class NetworkHandler:
 
         self.last_notify_id = 0
         self.pending_notifications = {}
-        
+
         self._init_cmd = self._create_cmd("identify")
-        
-    def _get_local_ip(self):
-        """Gets the local IP address of the current machine."""
-        try:
-            return socket.gethostbyname(socket.gethostname())
-        except Exception as e:
-            logging.error(f"Failed to get local IP address: {e}")
-            return "127.0.0.1"
 
-    def _validate_port(self, port):
-        """
-        Validates the port to ensure it does not conflict with common services.
-
-        Args:
-            port (int): The requested port number.
-
-        Returns:
-            int: A valid port number.
-        """
-        # List of standard ports to avoid
-        reserved_ports = {1883, 5000, 7125, 8080, 8819, 8883}
-
-        if port in reserved_ports or port < 1024 or port > 65535:
-            logging.warning(f"Port {port} is reserved or invalid. Assigning a random free port.")
-            return 45800  # use default Port
-
-        return port
-    
     def _create_cmd(self, command):
         """
         Creates a properly formatted command with checksum and newline.
@@ -83,222 +64,69 @@ class NetworkHandler:
             str: The full command string with checksum and newline appended.
         """
         checksum = self._calculate_checksum(command)
-        full_command = f"{command}*{checksum}\n".encode('utf-8')
-        return full_command
+        return f"{command}*{checksum}\n".encode("utf-8")
 
     def _calculate_checksum(self, command):
-        """Calculates a simple checksum for data integrity."""
-        return sum(command.encode('utf-8')) % 256
-    
-    def _is_connection_ready(self):
         """
-        Checks if the connection is ready by sending an identification command.
-
-        Returns:
-            bool: True if the connection is ready; False otherwise.
-        """
-        try:
-            self.client_socket.sendall(self._init_cmd)
-            logging.debug(f"Sent init command: {self._init_cmd.decode('utf-8').strip()}")
-
-            data = self.client_socket.recv(1024).decode('utf-8').strip()
-            if "*" in data:
-                msg, crc = data.rsplit("*", 1)
-                if int(crc) == int(self._calculate_checksum(msg)):
-                    if msg == f"mcu={self._mcu_name}":
-                        return True
-            return False
-        except Exception as e:
-            logging.error(f"Error while checking connection readiness: {e}")
-            return False
-
-    def connect(self):
-        """Starts the TCP server and listens for incoming connections."""
-        try:
-            self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            self.server_socket.bind((self.hostIp, self.port))
-            self.server_socket.listen(1)  # Accept one client at a time
-            logging.info(f"Server started on {self.hostIp}:{self.port}")
-
-            # Accept a client connection
-            self.client_socket, self.client_address = self.server_socket.accept()
-            logging.info(f"Client connected from {self.client_address}")
-            
-            # Check if the connection is ready and the MCU identifies itself correctly
-            if not self._is_connection_ready():
-                self.client_socket.close()
-                raise TimeoutError("Connection not ready.")
-
-            self.running = True
-            
-            # Start threads for communication            
-            self.read_thread = threading.Thread(target=self._read_thread)
-            self.write_thread = threading.Thread(target=self._write_thread)
-            self.process_incoming_thread = threading.Thread(target=self._process_incoming_thread)
-            self.read_thread.start()
-            self.write_thread.start()
-            self.process_incoming_thread.start()
-
-        except Exception as e:
-            logging.error(f"Failed to start server: {e}")
-            raise
-
-    def disconnect(self):
-        """Stops the server and disconnects the client."""
-        self.running = False
-        if self.read_thread:
-            self.read_thread.join()
-        if self.write_thread:
-            self.write_thread.join()
-        if self.process_incoming_thread:
-            self.process_incoming_thread.join()
-        if self.client_socket:
-            self.client_socket.close()
-            self.client_socket = None
-        if self.server_socket:
-            self.server_socket.close()
-            self.server_socket = None
-        logging.info("Server stopped.")
-
-    def _read_thread(self):
-        """Reads data from the network socket and puts it into the incoming queue."""
-        while self.running:
-            try:
-                data = self.client_socket.recv(1024).decode('utf-8').strip()
-                if data:
-                    logging.debug(f"Received raw message: {data}")
-                    self.incoming_queue.put(data)
-            except socket.timeout:
-                continue
-            except Exception as e:
-                logging.error(f"Error reading from socket: {e}")
-                self.running = False
-
-    def _process_incoming_thread(self):
-        """Processes messages from the incoming queue."""
-        while self.running:
-            try:
-                line = self.incoming_queue.get(timeout=0.1)
-                logging.debug(f"Processing message: {line}")
-
-                if "*" in line:
-                    msg, crc = line.rsplit("*", 1)
-                    if int(crc) == self._calculate_checksum(msg):
-                        self._handle_message(msg)
-                    else:
-                        logging.error(f"CRC mismatch for message: {msg}")
-            except Empty:
-                pass
-            except Exception as e:
-                logging.error(f"Error processing message: {e}")
-
-    def _write_thread(self):
-        """Sends data from the outgoing queue over the network connection."""
-        while self.running:
-            try:
-                message = self.outgoing_queue.get(timeout=0.1)
-                full_msg = self._create_cmd(message)
-                self.client_socket.sendall(full_msg)
-                logging.debug(f"Sent message: {full_msg.strip()}")
-            except Empty:
-                pass
-            except Exception as e:
-                logging.error(f"Error sending message: {e}")
-
-    def _handle_message(self, message):
-        """Processes incoming messages and dispatches them to the appropriate handler."""
-        logging.debug(f"Received message: {message}")
-        with self.lock:
-            parts = message.split(' ', 1)
-            cmd = parts[0]
-            data = parts[1] if len(parts) > 1 else ""
-
-            handler = self.response_handlers.get(cmd, self._default_handler)
-            handler(data)
-
-    def send_message(self, command):
-        """Sends a command over the network connection."""
-        self.outgoing_queue.put(command)
-        logging.debug(f"Queued message: {command}")
-
-    def register_response(self, handler, command):
-        """Registers a handler for a specific command."""
-        with self.lock:
-            self.response_handlers[command] = handler
-
-    def _default_handler(self, data):
-        """Default handler for unrecognized commands."""
-        logging.warning(f"Unhandled command: {data}")
-
-
-class SerialHandler:
-    def __init__(self, reactor, mcu_name):
-        """
-        Initializes the serial handler for UART communication.
+        Calculates a simple checksum for data integrity.
 
         Args:
-            reactor (reactor): Event reactor instance (reactor.py)
-        """
-        self.reactor = reactor
-        self.port = ''
-        self.baudrate = 115200
-        self._mcu_name = mcu_name
-                
-        self.serial_dev = None
-        self.lock = threading.Lock()
-        self.response_handlers = {}  # Handlers for different message types
-        self.running = False
-        self.read_thread = None
-        self.write_thread = None
-        self.process_incoming_thread = None
-
-        # Queues for incoming and outgoing messages
-        self.incoming_queue = Queue()
-        self.outgoing_queue = Queue()
-
-        self.last_notify_id = 0
-        self.pending_notifications = {}
-        
-        self._init_cmd = self._create_cmd("identify")
-
-    def _create_cmd(self, command):
-        """
-        Creates a properly formatted (utf-8) command with checksum and newline.
-
-        Args:
-            command (str): The base command string to send.
+            command (str): The command string to calculate the checksum for.
 
         Returns:
-            str: The full command string with checksum and newline appended.
+            int: The calculated checksum value as utf-8 string.
         """
-        checksum = self._calculate_checksum(command)
-        full_command = f"{command}*{checksum}\n".encode('utf-8')
-        return full_command
+        return sum(command.encode("utf-8")) % 256
+
+    @abstractmethod
+    def _read_data(self) -> str:
+        """Abstract method to read data from the connection."""
+        pass
+
+    @abstractmethod
+    def _send_data(self, data):
+        """Abstract method to send data over the connection."""
+        pass
+
+    @abstractmethod
+    def _reset_device_input_buffer(self):
+        """Abstract method to reset the input buffer from the connection."""
+        pass 
+
+    @abstractmethod
+    def _setup_connection(self):
+        """Abstract method to set up the connection."""
+        pass
+
+    @abstractmethod
+    def _cleanup_connection(self):
+        """Abstract method to clean up the connection."""
+        pass
 
     def _is_connection_ready(self):
         """
-        Checks if the connection is ready by attempting to read data from the serial port.
+        Checks whether the connection is ready by attempting to send an identification request to the device.
 
         Returns:
-            bool: True if data is received, indicating the connection is ready; False otherwise.
+            bool: True if identifier is received, indicating the connection is ready; False otherwise.
         """
         try:
 
-            self.serial_dev.write(self._init_cmd)
+            self._send_data(self._init_cmd)
             logging.debug(f"Sent init command: {self._init_cmd.decode('utf-8').strip()}")
 
-            # Check if there is any data available in the serial input buffer
-            if self.serial_dev.in_waiting > 0:
-                line = self.serial_dev.readline().decode('utf-8').strip()
-                logging.debug(f"Received during readiness check: {line}")
+            # Check if there is any data available in the input buffer
+            data = self._read_data()
+            if data:
+                logging.debug(f"Received during identify check: {data}")
                 
                 # Parse the message and CRC
-                if "*" in line:
-                    msg, crc = line.rsplit("*", 1)
+                if "*" in data:
+                    msg, crc = data.rsplit("*", 1)
                     if int(crc) == int(self._calculate_checksum(msg)): 
                         if msg == f"mcu={self._mcu_name}":
                             self.reactor.pause(self.reactor.monotonic() + 0.1)
-                            self.serial_dev.reset_input_buffer()  # clear buffer
+                            self._reset_device_input_buffer()
                             return True
 
             # No data received, connection is not ready yet
@@ -308,20 +136,43 @@ class SerialHandler:
             # Log the error if any issue occurs during the readiness check
             logging.error(f"Error while checking connection readiness: {e}")
             return False
-    
-    def connect(self, port, baudrate=115200):
-        """Establishes a serial connection.
 
-        Args:
-            port (str): The serial port to connect to (e.g., '/dev/ttyUSB0').
-            baudrate (int): The baud rate for communication (default: 115200).
-        """
-        self.port = port
-        self.baudrate = baudrate
+    def _read_thread(self):
+        """Reads data from device and stores it in the queue."""
+        while self.running:
+            try:
+                # read data from device
+                data = self._read_data()
+                if data:
+                    logger._log_debug(f"Received raw message: {data}")
 
+                    # store data in the incoming queue
+                    self.incoming_queue.put(data)
+
+            except Exception as e:
+                logging.error(f"Error reading data: {e}")
+                self.running = False
+
+    def _write_thread(self):
+        """Background thread for Sending data from the outgoing queue."""
+        while self.running:
+            try:
+                # Get the next message to send
+                message = self.outgoing_queue.get(timeout=0.1)
+
+                full_msg = self._create_cmd(message)
+                self._send_data(full_msg)
+                logger._log_debug(f"Sent message: {full_msg.strip()}")
+            except Empty: # Queue is empty
+                # No messages to send; continue waiting
+                pass
+            except Exception as e:
+                logging.error(f"Error sending message: {e}")
+
+    def connect(self):
+        """Sets up the connection and starts communication threads."""
         try:
-            self.serial_dev = serial.Serial(self.port, self.baudrate, timeout=0) # Non-blocking mode
-            logging.info(f"Connected to {self.port} at {self.baudrate} baud.")
+            self._setup_connection()
 
             # Test whether the connection is ready 
             start_time = self.reactor.monotonic()
@@ -329,15 +180,15 @@ class SerialHandler:
 
             while self.reactor.monotonic() - start_time < timeout:
                 if self._is_connection_ready():
-                    logging.info("Serial connection is ready.")
+                    logging.info("connection is ready.")
                     self.running = True
                     break
                 self.reactor.pause(self.reactor.monotonic() + 0.1)  # simple dirty solutions to avoid blocking the main thread completely
 
             if not self.running:
-                self.serial_dev.close()
-                raise TimeoutError("Connection not ready within timeout period.")
-            
+                self._cleanup_connection()
+                raise TimeoutError("connection not ready within timeout period.")
+
             # Start threads for reading and writing
             self.read_thread = threading.Thread(target=self._read_thread)
             self.write_thread = threading.Thread(target=self._write_thread)
@@ -345,66 +196,37 @@ class SerialHandler:
             self.read_thread.start()
             self.write_thread.start()
             self.process_incoming_thread.start()
-            
-        except serial.SerialException as e:
-            logging.error(f"Failed to connect to {self.port}: {e}")
+
+        except Exception as e:
+            logging.error(f"Failed to establish connection: {e}")
             raise
 
     def disconnect(self):
-        """Closes the serial connection."""
+        """Stops communication and cleans up resources."""
         self.running = False
+
+        # Stop all threads
         if self.read_thread:
             self.read_thread.join()
         if self.write_thread:
             self.write_thread.join()
         if self.process_incoming_thread:
             self.process_incoming_thread.join()
-        if self.serial_dev:
-            self.serial_dev.close()
-            self.serial_dev = None
-        logging.info("Serial connection closed.")
 
-    # Temporärer Logger mit Zeitstempel
-    def _log_debug(self, message):
-        if logging.getLogger().level == logging.DEBUG:
-            current_time = time.time()
-            local_time = time.localtime(current_time)
-            milliseconds = int((current_time - int(current_time)) * 1000)
-            timestamp = time.strftime('%Y-%m-%d %H:%M:%S', local_time)
-            logging.debug(f"{timestamp}.{milliseconds} {message}")
-
-
-    def _read_thread(self):
-        """
-        Reads serial data and stores it in the incoming queue.
-        """
-        while self.running:
-            try:
-                if self.serial_dev.in_waiting > 0:
-                    # Read a line from the serial device
-                    line = self.serial_dev.readline().decode('utf-8').strip()
-                    self._log_debug(f"Received raw message: {line}")
-                    
-                    # Store the line in the incoming queue
-                    self.incoming_queue.put(line)
-                    
-            except Exception as e:
-                logging.error(f"Error reading from serial: {e}")
-                self.running = False
+        # Clean up the specific connection
+        self._cleanup_connection()
 
     def _process_incoming_thread(self):
-        """
-        Processes messages from the incoming queue.
-        """
+        """Processes messages from the incoming queue."""
         while self.running:
             try:
                 # Get the next message from the incoming queue
-                line = self.incoming_queue.get(timeout=0.1)  # Wait for a message
-                self._log_debug(f"Processing message: {line}")
+                data = self.incoming_queue.get(timeout=0.1) # Wait for a message
+                logger._log_debug(f"Processing message: {data}")
 
                 # Parse the message and CRC
-                if "*" in line:
-                    msg, crc = line.rsplit("*", 1)
+                if "*" in data:
+                    msg, crc = data.rsplit("*", 1)
 
                     # Validate the CRC
                     try:
@@ -413,7 +235,7 @@ class SerialHandler:
                             logging.error(f"CRC mismatch for message: {msg}, expected: {expected_crc}, got: {crc}")
                             continue
                     except ValueError:
-                        logging.error(f"Invalid CRC in message: {line}")
+                        logging.error(f"Invalid CRC in message: {data}")
                         continue
 
                     # Check for notification ID (NID)
@@ -425,37 +247,20 @@ class SerialHandler:
                                 if nid in self.pending_notifications:
                                     # Complete the associated notification
                                     completion = self.pending_notifications.pop(nid)
-                                    self.reactor.async_complete(completion, line)
+                                    self.reactor.async_complete(completion, data)
                                     continue
                             except ValueError:
                                 logging.error(f"Invalid nid in message: {msg}")
                                 continue
 
                     # If no matching notification, process the message
-                    self._handle_message(line)
+                    self._handle_message(data)
 
             except Empty:
                 # No messages in the queue, continue
                 pass
             except Exception as e:
                 logging.error(f"Error processing message: {e}")
-                          
-    def _write_thread(self):
-        """Background thread for sending serial data from the queue."""
-        while self.running:
-            try:
-                # Get the next message to send
-                message = self.outgoing_queue.get(timeout=0.1)  # Non-blocking mode
-                try:
-                    full_msg = self._create_cmd(message) 
-                    self.serial_dev.write(full_msg)
-                    self._log_debug(f"Sent message: {full_msg.strip()}")
-                    break
-                except Exception as e:
-                    logging.error(f"Failed to send message.")
-            except Empty:
-                # No messages to send; continue waiting
-                pass
 
     def _handle_message(self, message):
         """
@@ -464,33 +269,30 @@ class SerialHandler:
         Args:
             message (str): The received message.
         """
-        self._log_debug(f"Received message: {message}")
+        logger._log_debug(f"Received message: {message}")
         with self.lock:
-            parts = message.split(' ', 1)
+            parts = message.split(" ", 1)
             cmd = parts[0]
             if cmd.endswith(":"):
-                cmd = cmd[:-1]
+                cmd = cmd[:-1]            
             data = parts[1] if len(parts) > 1 else ""
 
             # Check for registered command handlers
             handler = self.response_handlers.get(cmd, self._default_handler)
             handler(data)
-   
-    def _calculate_checksum(self, command):
+
+    def _default_handler(self, data):
         """
-        Calculates a simple checksum for data integrity.
+        Default handler for unrecognized commands.
 
         Args:
-            command (str): The command string to calculate the checksum for.
-
-        Returns:
-            int: The calculated checksum value.
+            data (str): The data associated with the command.
         """
-        return sum(command.encode('utf-8')) % 256
+        logging.warning(f"Unhandled command: {data}")
 
     def send_message(self, command, expect_ack=False, wait_for_response=False):
         """
-        Sends a command over the serial connection with optional ACK handling.
+        Sends a command over the connection with optional ACK handling.
 
         Args:
             command (str): The command to send.
@@ -512,8 +314,8 @@ class SerialHandler:
 
                 # Send the command with the notification ID
                 full_msg = self._create_cmd(f"{command} nid={nid}")
-                self.serial_dev.write(full_msg)
-                self._log_debug(f"Sent message: {full_msg.strip()}")
+                self._send_data(full_msg)
+                logger._log_debug(f"Sent message: {full_msg.strip()}")
 
                 # Wait for an ACK response
                 completion = self.reactor.completion()
@@ -537,8 +339,8 @@ class SerialHandler:
             while retries > 0:
                 try:
                     full_msg = self._create_cmd(command)
-                    self.serial_dev.write(full_msg)
-                    self._log_debug(f"Sent message: {full_msg.strip()}")
+                    self._send_data(full_msg)
+                    logger._log_debug(f"Sent message: {full_msg.strip()}")
 
                     # Wait for a response
                     start_time = time.time()
@@ -546,7 +348,7 @@ class SerialHandler:
                         try:
                             response = self.incoming_queue.get(timeout=retry_delay)
                             if response:
-                                self._log_debug(f"Response received: {response}")
+                                logger._log_debug(f"Response received: {response}")
                                 return response
                         except Empty:
                             pass
@@ -565,9 +367,9 @@ class SerialHandler:
         else:
             # Send message without ACK, over queue
             self.outgoing_queue.put(command)
-            self._log_debug(f"Queued message: {command}")
+            logger._log_debug(f"Queued message: {command}")
 
-    def register_response(self, handler, command, oid=None):
+    def register_response(self, handler, command, oid):
         """
         Registers a handler for a specific command.
 
@@ -578,14 +380,136 @@ class SerialHandler:
         with self.lock:
             self.response_handlers[command] = handler
 
-    def _default_handler(self, data):
+
+class NetworkHandler(CommunicationHandler):
+    def __init__(self, reactor, mcu_name, hostIp=None, port=45800):
         """
-        Default handler for unrecognized commands.
+        Initializes the Network handler for TCP communication.
 
         Args:
-            data (str): The data associated with the command.
+            reactor (reactor): Event reactor instance (reactor.py).
+            mcu_name (str): Name of the MCU to identify.
+            hostIp (str): IP address to bind the server. (default: current IP)
+            port (int): Port number for the server to listen on. (default: 45800)
         """
-        logging.warning(f"Unhandled command: {data}")
+        super().__init__(reactor, mcu_name)
+
+        # Get the current IP if hostIp is not specified
+        self.hostIp = hostIp or self._get_local_ip()
+
+        # Validate and set the port
+        self.port = self._validate_port(port)
+
+        self.server_socket = None
+        self.client_socket = None
+        self.client_address = None
+
+    def _get_local_ip(self):
+        """Gets the local IP address of the current machine."""
+        try:
+            return socket.gethostbyname(socket.gethostname())
+        except Exception as e:
+            logging.error(f"Failed to get local IP address: {e}")
+            return "127.0.0.1"
+
+    def _validate_port(self, port):
+        """
+        Validates the port to ensure it does not conflict with common services.
+
+        Args:
+            port (int): The requested port number.
+
+        Returns:
+            int: A valid port number.
+        """
+        # List of standard "klipper" ports to avoid        
+        reserved_ports = {1883, 5000, 7125, 8080, 8819, 8883}
+        if port in reserved_ports or port < 1024 or port > 65535:
+            logging.warning(f"Port {port} is reserved or invalid. Assigning default port.")
+            return 45800
+        return port
+
+    def _setup_connection(self):
+        self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.server_socket.bind((self.hostIp, self.port))
+        self.server_socket.listen(1) # Accept one client at a time
+        logging.info(f"Server for {self._mcu_name} started on {self.hostIp}:{self.port}")
+
+        # Accept a client connection
+        self.client_socket, self.client_address = self.server_socket.accept()
+        logging.info(f"Client connected from {self.client_address}")
+
+    def _cleanup_connection(self):
+        if self.client_socket:
+            self.client_socket.close()
+            self.client_socket = None
+        if self.server_socket:
+            self.server_socket.close()
+            self.server_socket = None
+        logging.info(f"Server for {self._mcu_name} stopped.")
+
+    def _read_data(self):
+        if self.client_socket is not None:
+            return self.client_socket.recv(1024).decode("utf-8").strip()
+        return ""
+
+    def _send_data(self, data):
+        if self.client_socket is not None:
+            self.client_socket.sendall(data)
+    
+    def _reset_device_input_buffer(self):
+        """Clears the input buffer by reading all available data."""
+        if self.client_socket:
+            try:
+                blockingMode = self.client_socket.getblocking()
+                self.client_socket.setblocking(False)  # Nicht blockierender Modus
+                while True:
+                    data = self.client_socket.recv(8192)
+                    if not data:
+                        break  # Keine weiteren Daten mehr
+            except BlockingIOError:
+                pass  # Kein Fehler, wenn keine Daten mehr vorhanden sind
+            finally:
+                self.client_socket.setblocking(blockingMode)  # Ursprünglichen Modus wiederherstellen        
+
+
+class SerialHandler(CommunicationHandler):
+    def __init__(self, reactor, mcu_name, port="", baudrate=115200):
+        """
+        Initializes the serial handler for UART communication.
+
+        Args:
+            reactor (reactor): Event reactor instance (reactor.py)
+            mcu_name (str): Name of the MCU to identify.
+            port (str): The serial port to connect to (e.g., '/dev/ttyUSB0').
+            baudrate (int): The baud rate for communication (default: 115200).
+        """
+        super().__init__(reactor, mcu_name)
+        self.port = port
+        self.baudrate = baudrate
+        self.serial_dev = None
+
+    def _setup_connection(self):
+        self.serial_dev = serial.Serial(self.port, self.baudrate, timeout=0)
+        logging.info(f"Connected to {self.port} at {self.baudrate} baud.")
+
+    def _cleanup_connection(self):
+        if self.serial_dev:
+            self.serial_dev.close()
+            self.serial_dev = None
+
+    def _read_data(self):
+        if self.serial_dev and self.serial_dev.in_waiting > 0:
+            return self.serial_dev.readline().decode("utf-8").strip()
+        return None
+
+    def _send_data(self, data):
+        if self.serial_dev is not None:
+            self.serial_dev.write(data)
+    
+    def _reset_device_input_buffer(self):
+        if self.serial_dev is not None:
+            self.serial_dev.reset_input_buffer()
 
 class ArduinoMCU:
     def __init__(self, config):
@@ -625,7 +549,7 @@ class ArduinoMCU:
         
         # Initialize communication
         if self._commType == 'serial':
-            self._comm = SerialHandler(self._reactor, self._name)
+            self._comm = SerialHandler(self._reactor, self._name, self._port, self._baudrate)
         elif self._commType == 'lan':
             self._comm = NetworkHandler(self._reactor, self._name, self._ip, self._port)
         self.register_response(self.handle_error, "error")
@@ -761,7 +685,7 @@ class ArduinoMCU:
 
         logging.info(f"Establishing {self._name} connection...")
         try:
-            self._comm.connect(self._port, self._baudrate)
+            self._comm.connect()
             logging.info(f"Connected to Arduino on {self._port}.")
 
             # register Arduino_mcu as 'mcu' to show it in SystemLoad panel
@@ -958,7 +882,8 @@ class ArduinoMCU_adc(ArduinoMCUPin):
     def _raise_callback(self, eventtime):
         range = self._max_sample - self._min_sample
         sample_value = (self._value * range) + self._min_sample
-        self._callback(eventtime, sample_value)
+        if self._callback is not None: 
+            self._callback(eventtime, sample_value)
         return eventtime + 2.
     
     def _send_pin_config(self):
