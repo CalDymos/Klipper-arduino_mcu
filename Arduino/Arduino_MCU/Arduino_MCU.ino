@@ -3,7 +3,8 @@
 #include "KlipperComm.h"
 
 #define MCU_NAME "airfilter"        // mcu name
-#define MAX_COMMANDS 10             // max mcu commands
+#define MCU_FIRMWARE_VERSION "1.0"
+#define MAX_COMMANDS 6             // max mcu commands
 
 // is only required for communication via LAN or WLAN
 //***************************************************
@@ -23,7 +24,7 @@
 #endif
 //***************************************************
 
-KlipperComm klipperComm(MCU_NAME, MAX_COMMANDS);
+KlipperComm klipperComm(MCU_NAME, MCU_FIRMWARE_VERSION, MAX_COMMANDS);
 
 enum PinType {
     PIN_TYPE_DOUT, // Digital out
@@ -108,10 +109,10 @@ void sendPeriodicUpdates() {
       // Send the value based on the pin type
       if (config.type == PIN_TYPE_AIN) {
         int analogValue = analogRead(pin);
-        klipperComm.sendResponse("pin=" + String(pin) + " value=" + String(analogValue));
+        klipperComm.sendResponse("analog_in_state pin=" + String(pin) + " value=" + String(analogValue));
       } else if (config.type == PIN_TYPE_DIN) {
         int digitalValue = digitalRead(pin);
-        klipperComm.sendResponse("pin=" + String(pin) + " value=" + String(digitalValue));
+        klipperComm.sendResponse("digital_in_state pin=" + String(pin) + " value=" + String(digitalValue));
       }
 
       // Update the configuration in the map

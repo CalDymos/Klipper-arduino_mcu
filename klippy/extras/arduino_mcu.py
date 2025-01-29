@@ -35,6 +35,11 @@ class CommunicationHandler(ABC):
         self.reactor = reactor
         self._mcu_name = mcu_name
 
+        # identify data
+        self.mcu_version = "Unknown"
+        self.mcu_chip = "Unknown"
+        self.mcu_freq = 0
+
         self.lock = threading.Lock()
         self.response_handlers = {}
         self.running = False
@@ -51,7 +56,7 @@ class CommunicationHandler(ABC):
         self.last_notify_id = 0
         self.pending_notifications = {}
 
-        self._init_cmd = self._create_cmd("identify")
+        self._identify_cmd = self._create_cmd("identify")
 
     def _create_cmd(self, command):
         """
@@ -103,7 +108,7 @@ class CommunicationHandler(ABC):
         """Abstract method to clean up the connection."""
         pass
 
-    def _is_connection_ready(self):
+    def _get_identify_data(self):
         """
         Checks whether the connection is ready by attempting to send an identification request to the device.
 
@@ -112,8 +117,8 @@ class CommunicationHandler(ABC):
         """
         try:
 
-            self._send_data(self._init_cmd)
-            logging.debug(f"Sent init command: {self._init_cmd.decode('utf-8').strip()}")
+            self._send_data(self._identify_cmd)
+            logging.debug(f"Sent init command: {self._identify_cmd.decode('utf-8').strip()}")
 
             # Check if there is any data available in the input buffer
             data = self._read_data()
@@ -124,7 +129,19 @@ class CommunicationHandler(ABC):
                 if "*" in data:
                     msg, crc = data.rsplit("*", 1)
                     if int(crc) == int(self._calculate_checksum(msg)): 
-                        if msg == f"mcu={self._mcu_name}":
+
+                        # Parse parameters from msg
+                        parts = msg.split()
+                        params = {}
+                        for part in parts:
+                            if "=" in part:
+                                key, value = part.split("=")
+                                params[key] = value
+
+                        if params.get('mcu', '') == self._mcu_name:
+                            self.mcu_chip = params.get('chip', 'Unknown')
+                            self.mcu_version = params.get('version', 'Unknown')
+                            self.mcu_freq = int(params.get('freq', 0))
                             self.reactor.pause(self.reactor.monotonic() + 0.1)
                             self._reset_device_input_buffer()
                             return True
@@ -179,7 +196,7 @@ class CommunicationHandler(ABC):
             timeout = 5  # Waiting time for the connection to be ready
 
             while self.reactor.monotonic() - start_time < timeout:
-                if self._is_connection_ready():
+                if self._get_identify_data():
                     logging.info("connection is ready.")
                     self.running = True
                     break
@@ -490,9 +507,21 @@ class SerialHandler(CommunicationHandler):
         self.serial_dev = None
 
     def _setup_connection(self):
-        self.serial_dev = serial.Serial(self.port, self.baudrate, timeout=0)
-        logging.info(f"Connected to {self.port} at {self.baudrate} baud.")
+        start_time = self.reactor.monotonic()
+        while 1:
+            try:
+                if self.reactor.monotonic() > start_time + 90.:
+                    raise RuntimeError("Unable to connect")
 
+                self.serial_dev = serial.Serial(self.port, self.baudrate, timeout=0, exclusive=True)
+            except (OSError, IOError, serial.SerialException) as e:
+                logging.warning("%s: Unable to open serial port: %s",
+                             self._mcu_name, e)
+                self.reactor.pause(self.reactor.monotonic() + 5.)
+                continue
+
+            logging.info(f"Connected to {self.port} at {self.baudrate} baud.")
+            break
     def _cleanup_connection(self):
         if self.serial_dev:
             self.serial_dev.close()
@@ -524,12 +553,7 @@ class ArduinoMCU:
         else:
             self._commType = 'serial'
             self._port = config.get('port', '/dev/ttyUSB0') # Default port for serial
-            self._baudrate = config.getint('baud', 115200) # Default baudrate
-            
-        # vars for mcu stats
-        self._mcu_version = "Unknown"
-        self._mcu_freq = 0
-        self._mcu_chip = 'Unknown'       
+            self._baudrate = config.getint('baud', 115200) # Default baudrate   
         
         self._debuglevel = config.get('debug', False)
         if self._debuglevel:
@@ -697,11 +721,11 @@ class ArduinoMCU:
 
     def get_status(self, eventtime):
         status = {
-            'mcu_version': self._mcu_version,
+            'mcu_version': self._comm.mcu_version,
             #'mcu_build_versions': 'gcc: 10.2.1 binutils: 2.35.2',
             'mcu_constants': {
-                'CLOCK_FREQ': self._mcu_freq,
-                'MCU': self._mcu_chip,
+                'CLOCK_FREQ': self._comm.mcu_freq,
+                'MCU': self._comm.mcu_chip,
                 #'ADC_MAX': 1023,
                 #'PWM_MAX': 255,
             },
@@ -713,7 +737,7 @@ class ArduinoMCU:
             #    'bytes_read': 6000,
             #    'bytes_retransmit': 0,
             #    'bytes_invalid': 0,
-                'freq': self._mcu_freq,
+                'freq': self._comm.mcu_freq,
             },
             'pins': {
                 name: pin.get_status(eventtime)

@@ -17,6 +17,8 @@
 class KlipperComm {
 private:
     String mcuName;                                   // Name of MCU
+    String mcuFirmwareVersion;                        // FirmwareVersion of MCU
+    String mcuChip;                                   // Chip
     Map<String, void (*)(const String&)> commandMap;  // Map for command callbacks
 
 #ifdef USE_WIFI
@@ -57,8 +59,10 @@ private:
 #endif
 
 public:
-    KlipperComm(const String& mcuName, uint8_t maxCommands)
-        : mcuName(mcuName), commandMap(maxCommands) {}
+    KlipperComm(const String& mcuName, const String& mcuFirmwareVersion, uint8_t maxCommands)
+        : mcuName(mcuName), mcuFirmwareVersion(mcuFirmwareVersion), commandMap(maxCommands) {
+          mcuChip = "Unknown"; // TODO: get MCU chip with method
+        }
 
 #if !defined(USE_ETHERNET) && !defined(USE_WIFI)
 
@@ -210,7 +214,7 @@ public:
         }
 
         if (command == "identify") {
-            sendResponse("mcu=" + mcuName);
+            sendResponse("mcu=" + mcuName + " freq=" + F_CPU + " chip=" + mcuChip + " version=" + mcuFirmwareVersion);
             return;
         } else {
             splitIndex = input.indexOf(' ');
