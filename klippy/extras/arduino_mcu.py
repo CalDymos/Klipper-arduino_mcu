@@ -1,7 +1,7 @@
 import logging
 import threading
 import serial, socket
-import time, reactor
+import time, reactor, select, selectors
 from queue import Queue, Empty
 from abc import ABC, abstractmethod
 
@@ -23,6 +23,119 @@ class logger:
             timestamp = time.strftime('%Y-%m-%d %H:%M:%S', local_time)
             logging.debug(f"{timestamp}.{milliseconds} {message}")
 
+
+class MessageParser:
+    def __init__(self, mcu_name: str = ""):
+        """
+        class to parse the data getting from device.
+        """
+        self._mcu_name = mcu_name
+
+    def _calculate_checksum(self, command: str) -> int:
+        """
+        Calculates a simple checksum for data integrity.
+
+        Args:
+            command (str): The command string to calculate the checksum for.
+
+        Returns:
+            int: The calculated checksum value as utf-8 string.
+        """
+        return sum(command.encode("utf-8")) % 256
+
+    def validate(self, data: str) -> str:
+        """
+        Validates a message by checking its checksum.
+
+        Args:
+            data (str): The raw message string received.
+
+        Returns:
+            str : The message if valid, otherwise empty str.
+        """
+        logging.debug(f"{self._mcu_name}: Received data to validate: {data}")
+        if "*" in data:
+            msg, crc = data.rsplit("*", 1)
+            try:
+                if int(crc) == self._calculate_checksum(msg):
+                    return msg
+                else:
+                    logging.warning(f"{self._mcu_name}: Checksum mismatch. Message '{msg}' discarded.")
+            except ValueError:
+                logging.warning(f"{self._mcu_name}: Invalid checksum format in data '{data}'.")
+
+        logging.error(f"{self._mcu_name}: checksum for data '{data}' missing")
+        return ""
+
+    def get_msg(self, data: str) -> str:
+        """
+        return message without checksum part.
+
+        Args:
+            data (str): The raw message string received.
+
+        Returns:
+            str : The message without crc, otherwise empty str.
+        """  
+        if "*" in data:
+            msg = data.rsplit("*", 1)
+            return msg[0]
+        return ""     
+             
+    def parse(self, msg: str) -> dict:
+        """
+        Parses a valid message, and extracts parameters.
+
+        Args:
+            msg (str): The message string received without CRC.
+
+        Returns:
+            dict: Parsed key-value parameters
+        """
+        logging.debug(f"{self._mcu_name}: Received msg to parse: {msg}")
+
+        if msg:
+            # Parse parameters from msg
+            parts = msg.split()
+            params = {}
+            for part in parts:
+                if "=" in part:
+                    key, value = part.split("=")
+                    params[key] = value
+            return params
+
+        return {}
+    
+    def create_cmd(self, command: str) -> bytes:
+        """
+        Creates a properly formatted command with checksum and newline.
+
+        Args:
+            command (str): The base command string to send.
+
+        Returns:
+            bytes: The full command string with checksum and newline, encoded asa UTF-8.
+        """
+        checksum = self._calculate_checksum(command)
+        return f"{command}*{checksum}\n".encode("utf-8")
+    
+    def get_cmd(self, msg: str) -> str:
+        """
+        Extracts the command part from a valid message.
+
+        Args:
+            data (str): The (raw) message string received.
+
+        Returns:
+            str : The command if valid, otherwise empty str.
+        """
+
+        if msg:
+            cmd = msg.split(" ", 1)[0]
+            return cmd.rstrip(":") #removes trailing ':' (if exists) and return command
+
+        return ""
+    
 class CommunicationHandler(ABC):
     def __init__(self, reactor, mcu_name):
         """
@@ -34,6 +147,9 @@ class CommunicationHandler(ABC):
         """
         self.reactor = reactor
         self._mcu_name = mcu_name
+        
+        self.msgparser = MessageParser(self._mcu_name)
+        self.partial_data = ""  # Buffer für unvollständige Nachrichten
 
         # identify data
         self.mcu_version = "Unknown"
@@ -56,32 +172,7 @@ class CommunicationHandler(ABC):
         self.last_notify_id = 0
         self.pending_notifications = {}
 
-        self._identify_cmd = self._create_cmd("identify")
-
-    def _create_cmd(self, command):
-        """
-        Creates a properly formatted command with checksum and newline.
-
-        Args:
-            command (str): The base command string to send.
-
-        Returns:
-            str: The full command string with checksum and newline appended.
-        """
-        checksum = self._calculate_checksum(command)
-        return f"{command}*{checksum}\n".encode("utf-8")
-
-    def _calculate_checksum(self, command):
-        """
-        Calculates a simple checksum for data integrity.
-
-        Args:
-            command (str): The command string to calculate the checksum for.
-
-        Returns:
-            int: The calculated checksum value as utf-8 string.
-        """
-        return sum(command.encode("utf-8")) % 256
+        self._identify_cmd = self.msgparser.create_cmd("identify")
 
     @abstractmethod
     def _read_data(self) -> str:
@@ -118,41 +209,34 @@ class CommunicationHandler(ABC):
         try:
 
             self._send_data(self._identify_cmd)
-            logging.debug(f"Sent init command: {self._identify_cmd.decode('utf-8').strip()}")
+            logging.debug(f"{self._mcu_name}: Sent init command: {self._identify_cmd.decode('utf-8').strip()}")
 
             # Check if there is any data available in the input buffer
             data = self._read_data()
             if data:
-                logging.debug(f"Received during identify check: {data}")
                 
-                # Parse the message and CRC
-                if "*" in data:
-                    msg, crc = data.rsplit("*", 1)
-                    if int(crc) == int(self._calculate_checksum(msg)): 
+                # validate CRC and Parse the message
+                params = self.msgparser.parse(self.msgparser.validate(data))
+                if params:
+                    if params.get('mcu', '') == self._mcu_name:
+                        self.mcu_chip = params.get('chip', 'Unknown')
+                        self.mcu_version = params.get('version', 'Unknown')
+                        self.mcu_freq = int(params.get('freq', 0))
+                        self.reactor.pause(self.reactor.monotonic() + 0.1)
+                        self._reset_device_input_buffer()
+                        return True
 
-                        # Parse parameters from msg
-                        parts = msg.split()
-                        params = {}
-                        for part in parts:
-                            if "=" in part:
-                                key, value = part.split("=")
-                                params[key] = value
-
-                        if params.get('mcu', '') == self._mcu_name:
-                            self.mcu_chip = params.get('chip', 'Unknown')
-                            self.mcu_version = params.get('version', 'Unknown')
-                            self.mcu_freq = int(params.get('freq', 0))
-                            self.reactor.pause(self.reactor.monotonic() + 0.1)
-                            self._reset_device_input_buffer()
-                            return True
-
-            # No data received, connection is not ready yet
+            # No valid data received, connection is not ready yet
             return False
 
         except Exception as e:
             # Log the error if any issue occurs during the readiness check
-            logging.error(f"Error while checking connection readiness: {e}")
+            logging.error(f"{self._mcu_name}: Error while checking connection readiness: {e}")
             return False
+
+    def _pause_thread(self, delay=0.001):
+        """sleep function to pause active thread."""
+        time.sleep(delay)
 
     def _read_thread(self):
         """Reads data from device and stores it in the queue."""
@@ -161,13 +245,13 @@ class CommunicationHandler(ABC):
                 # read data from device
                 data = self._read_data()
                 if data:
-                    logger._log_debug(f"Received raw message: {data}")
+                    logger._log_debug(f"{self._mcu_name}: Received raw message: {data}")
 
                     # store data in the incoming queue
                     self.incoming_queue.put(data)
 
             except Exception as e:
-                logging.error(f"Error reading data: {e}")
+                logging.error(f"{self._mcu_name}: Error reading data: {e}")
                 self.running = False
 
     def _write_thread(self):
@@ -177,14 +261,14 @@ class CommunicationHandler(ABC):
                 # Get the next message to send
                 message = self.outgoing_queue.get(timeout=0.1)
 
-                full_msg = self._create_cmd(message)
+                full_msg = self.msgparser.create_cmd(message)
                 self._send_data(full_msg)
-                logger._log_debug(f"Sent message: {full_msg.strip()}")
+                logger._log_debug(f"{self._mcu_name}: Sent message: {full_msg.strip()}")
             except Empty: # Queue is empty
                 # No messages to send; continue waiting
-                pass
+                self._pause_thread()
             except Exception as e:
-                logging.error(f"Error sending message: {e}")
+                logging.error(f"{self._mcu_name}: Error sending message: {e}")
 
     def connect(self):
         """Sets up the connection and starts communication threads."""
@@ -197,14 +281,14 @@ class CommunicationHandler(ABC):
 
             while self.reactor.monotonic() - start_time < timeout:
                 if self._get_identify_data():
-                    logging.info("connection is ready.")
+                    logging.info("{self._mcu_name}: connection is ready.")
                     self.running = True
                     break
                 self.reactor.pause(self.reactor.monotonic() + 0.1)  # simple dirty solutions to avoid blocking the main thread completely
 
             if not self.running:
                 self._cleanup_connection()
-                raise TimeoutError("connection not ready within timeout period.")
+                raise TimeoutError("{self._mcu_name}: connection not ready within timeout period.")
 
             # Start threads for reading and writing
             self.read_thread = threading.Thread(target=self._read_thread)
@@ -215,7 +299,7 @@ class CommunicationHandler(ABC):
             self.process_incoming_thread.start()
 
         except Exception as e:
-            logging.error(f"Failed to establish connection: {e}")
+            logging.error(f"{self._mcu_name}: Failed to establish connection: {e}")
             raise
 
     def disconnect(self):
@@ -239,75 +323,64 @@ class CommunicationHandler(ABC):
             try:
                 # Get the next message from the incoming queue
                 data = self.incoming_queue.get(timeout=0.1) # Wait for a message
-                logger._log_debug(f"Processing message: {data}")
+                logger._log_debug(f"{self._mcu_name}: Processing message: {data}")
 
-                # Parse the message and CRC
-                if "*" in data:
-                    msg, crc = data.rsplit("*", 1)
+                # CRC check
+                msg = self.msgparser.validate(data)
+                if not msg:
+                    continue
+                # Parse the message
+                params = self.msgparser.parse(msg)
+                if not params:
+                    continue
 
-                    # Validate the CRC
-                    try:
-                        expected_crc = self._calculate_checksum(msg)
-                        if int(crc) != expected_crc:
-                            logging.error(f"CRC mismatch for message: {msg}, expected: {expected_crc}, got: {crc}")
-                            continue
-                    except ValueError:
-                        logging.error(f"Invalid CRC in message: {data}")
+                # Check for notification ID (NID)
+                nid = int(params.get("nid", 0))
+                if nid:
+                    if nid in self.pending_notifications:
+                        # Complete the associated notification
+                        completion = self.pending_notifications.pop(nid)
+                        self.reactor.async_complete(completion, data)
                         continue
+                else:
+                    logging.error(f"{self._mcu_name}: Invalid nid in message: {data}")
+                    continue
 
-                    # Check for notification ID (NID)
-                    if "nid=" in msg:
-                        parts = msg.split("nid=")
-                        if len(parts) > 1:
-                            try:
-                                nid = int(parts[1])
-                                if nid in self.pending_notifications:
-                                    # Complete the associated notification
-                                    completion = self.pending_notifications.pop(nid)
-                                    self.reactor.async_complete(completion, data)
-                                    continue
-                            except ValueError:
-                                logging.error(f"Invalid nid in message: {msg}")
-                                continue
-
-                    # If no matching notification, process the message
-                    self._handle_message(data)
+                # If no matching notification, process the message
+                self._handle_message(msg)
 
             except Empty:
                 # No messages in the queue, continue
-                pass
+                self._pause_thread()
             except Exception as e:
-                logging.error(f"Error processing message: {e}")
+                logging.error(f"{self._mcu_name}: Error processing message: {e}")
 
-    def _handle_message(self, message):
+    def _handle_message(self, msg: str):
         """
         Processes incoming messages and dispatches them to the appropriate handler.
 
         Args:
-            message (str): The received message.
+            message (str): The received validated message.
         """
-        logger._log_debug(f"Received message: {message}")
+        logger._log_debug(f"{self._mcu_name}: Received message: {msg}")
         with self.lock:
-            parts = message.split(" ", 1)
-            cmd = parts[0]
-            if cmd.endswith(":"):
-                cmd = cmd[:-1]            
-            data = parts[1] if len(parts) > 1 else ""
-
+            cmd = self.msgparser.get_cmd(msg)
+            params = self.msgparser.parse(msg)
+ 
             # Check for registered command handlers
             handler = self.response_handlers.get(cmd, self._default_handler)
-            handler(data)
+            handler(params)
 
-    def _default_handler(self, data):
+    def _default_handler(self, params: dict):
         """
         Default handler for unrecognized commands.
 
         Args:
-            data (str): The data associated with the command.
+            params (dict): The data associated with the command.
         """
-        logging.warning(f"Unhandled command: {data}")
+        logging.warning(f"{self._mcu_name}: Unhandled command")
 
-    def send_message(self, command, expect_ack=False, wait_for_response=False):
+    def send_message(self, command, expect_ack: bool=False, wait_for_response: bool=False):
         """
         Sends a command over the connection with optional ACK handling.
 
@@ -330,9 +403,9 @@ class CommunicationHandler(ABC):
                 self.pending_notifications[nid] = completion
 
                 # Send the command with the notification ID
-                full_msg = self._create_cmd(f"{command} nid={nid}")
+                full_msg = self.msgparser.create_cmd(f"{command} nid={nid}")
                 self._send_data(full_msg)
-                logger._log_debug(f"Sent message: {full_msg.strip()}")
+                logger._log_debug(f"{self._mcu_name}: Sent message: {full_msg.strip()}")
 
                 # Wait for an ACK response
                 completion = self.reactor.completion()
@@ -343,11 +416,11 @@ class CommunicationHandler(ABC):
                 response = completion.wait(waketime=waketime, waketime_result=None) # wait for response
                 if response is None:
                     del self.pending_notifications[nid]  # Cleanup pending notification
-                    raise TimeoutError(f"No ACK received for: {command}")
+                    raise TimeoutError(f"{self._mcu_name}: No ACK received for: {command}")
 
                 return response
             except Exception as e:
-                logging.error(f"Error sending message: {e}")
+                logging.error(f"{self._mcu_name}: Error sending message: {e}")
                 raise
 
         elif wait_for_response:
@@ -355,9 +428,9 @@ class CommunicationHandler(ABC):
             retry_delay = 0.01
             while retries > 0:
                 try:
-                    full_msg = self._create_cmd(command)
+                    full_msg = self.msgparser.create_cmd(command)
                     self._send_data(full_msg)
-                    logger._log_debug(f"Sent message: {full_msg.strip()}")
+                    logger._log_debug(f"{self._mcu_name}: Sent message: {full_msg.strip()}")
 
                     # Wait for a response
                     start_time = time.time()
@@ -365,26 +438,26 @@ class CommunicationHandler(ABC):
                         try:
                             response = self.incoming_queue.get(timeout=retry_delay)
                             if response:
-                                logger._log_debug(f"Response received: {response}")
+                                logger._log_debug(f"{self._mcu_name}: Response received: {response}")
                                 return response
                         except Empty:
                             pass
 
                     # No response; retry
                     retries -= 1
-                    logging.warning(f"Retrying message ({5 - retries}/5): {command}")
+                    logging.warning(f"{self._mcu_name}: Retrying message ({5 - retries}/5): {command}")
                     retry_delay *= 2  # Exponential backoff
                 except Exception as e:
-                    logging.error(f"Error sending message: {e}")
+                    logging.error(f"{self._mcu_name}: Error sending message: {e}")
                     retries -= 1
 
-            logging.error(f"Failed to receive response after retries for: {command}")
-            raise TimeoutError(f"No response received for: {command}")
+            logging.error(f"{self._mcu_name}: Failed to receive response after retries for: {command}")
+            raise TimeoutError(f"{self._mcu_name}: No response received for: {command}")
 
         else:
             # Send message without ACK, over queue
             self.outgoing_queue.put(command)
-            logger._log_debug(f"Queued message: {command}")
+            logger._log_debug(f"{self._mcu_name}: Queued message: {command}")
 
     def register_response(self, handler, command, oid):
         """
@@ -421,6 +494,8 @@ class NetworkHandler(CommunicationHandler):
         self.client_socket = None
         self.client_address = None
 
+        self.selector = selectors.DefaultSelector()
+
     def _get_local_ip(self):
         """Gets the local IP address of the current machine."""
         try:
@@ -456,6 +531,8 @@ class NetworkHandler(CommunicationHandler):
         self.client_socket, self.client_address = self.server_socket.accept()
         logging.info(f"Client connected from {self.client_address}")
 
+        self.selector.register(self.client_socket, selectors.EVENT_READ)
+
     def _cleanup_connection(self):
         if self.client_socket:
             self.client_socket.close()
@@ -466,9 +543,31 @@ class NetworkHandler(CommunicationHandler):
         logging.info(f"Server for {self._mcu_name} stopped.")
 
     def _read_data(self):
-        if self.client_socket is not None:
-            return self.client_socket.recv(1024).decode("utf-8").strip()
-        return ""
+        """Reads network data using polling."""
+        if self.client_socket:
+            try:
+                events = self.selector.select(timeout=1.0)
+                if events:
+                    # Receive new data
+                    new_data = self.client_socket.recv(1024).decode("utf-8")
+                    if not new_data:
+                        return ""
+
+                    # Extend buffer
+                    self.partial_data += new_data
+
+                    # Check whether a complete message is available
+                    if "\n" in self.partial_data:
+                        lines = self.partial_data.split("\n")
+                        complete_msg = lines[0]  # First complete line
+                        self.partial_data = "\n".join(lines[1:])  # Rest back into the buffer
+
+                        return complete_msg.strip()  # Return the complete message
+                
+                return ""  # No complete message yet, keep waiting
+            except Exception as e:
+                logging.error(f"Error when reading the data: {e}")
+                return ""
 
     def _send_data(self, data):
         if self.client_socket is not None:
@@ -505,6 +604,7 @@ class SerialHandler(CommunicationHandler):
         self.port = port
         self.baudrate = baudrate
         self.serial_dev = None
+        self.poll_obj = select.poll()
 
     def _setup_connection(self):
         start_time = self.reactor.monotonic()
@@ -514,6 +614,10 @@ class SerialHandler(CommunicationHandler):
                     raise RuntimeError("Unable to connect")
 
                 self.serial_dev = serial.Serial(self.port, self.baudrate, timeout=0, exclusive=True)
+
+                # Registers the file descriptor of the serial interface with the poll object.
+                self.poll_obj.register(self.serial_dev.fileno(), select.POLLIN)       
+
             except (OSError, IOError, serial.SerialException) as e:
                 logging.warning("%s: Unable to open serial port: %s",
                              self._mcu_name, e)
@@ -528,9 +632,24 @@ class SerialHandler(CommunicationHandler):
             self.serial_dev = None
 
     def _read_data(self):
-        if self.serial_dev and self.serial_dev.in_waiting > 0:
-            return self.serial_dev.readline().decode("utf-8").strip()
-        return None
+        """Reads complete lines from the serial port using polling"""
+        if self.serial_dev:
+            try:
+                events = self.poll_obj.poll(1000) # Timout 1000ms
+                if events:
+                    new_data = self.serial_dev.read(self.serial_dev.in_waiting).decode("utf-8")
+                    self.partial_data += new_data
+
+                    if "\n" in self.partial_data:
+                        lines = self.partial_data.split("\n")
+                        complete_msg = lines[0]  # Erste vollständige Zeile
+                        self.partial_data = "\n".join(lines[1:])  # Rest in Buffer speichern
+                        return complete_msg.strip()
+
+                return ""  # No complete line yet
+            except Exception as e:
+                logging.error(f"Error reading from the serial port: {e}")
+                return ""
 
     def _send_data(self, data):
         if self.serial_dev is not None:
@@ -559,9 +678,7 @@ class ArduinoMCU:
         if self._debuglevel:
             logging.getLogger().setLevel(logging.DEBUG) 
 
-        # Store captured configuration commands for buttons
-        self._button_config_commands = []  # List to track button configuration commands
-        self._buttons_config_complete = False  # Flag to indicate when config is ready
+        self._config_messages = []  # List for configuration messages
 
         # init Arduino MCU
         ppins = self._printer.lookup_object('pins')
@@ -591,7 +708,7 @@ class ArduinoMCU:
     def setup_pin(self, pin_type, pin_params):
         ppins = self._printer.lookup_object('pins')
         name = pin_params['pin']
-        logging.debug(f"setup_pin for pin_type: {pin_type}")
+        logging.debug(f"{self._name}: setup_pin for pin_type: {pin_type}")
         if name in self._pins:
             return self._pins[name]
         if pin_type == 'digital_out':
@@ -611,53 +728,42 @@ class ArduinoMCU:
         return self._oid_count - 1
 
     def register_config_callback(self, cb):
-        logging.debug(f"Registering config callback: {cb}")
+        logging.debug(f"{self._name}: Registering config callback: {cb}")
         self._config_callbacks.append(cb)
 
-    def _send_buttons_config(self):
+    def _send_config(self):
         """
         Sends all captured button configuration commands to the Arduino MCU.
         """
-        if not self._buttons_config_complete:
-            logging.warning("Button configuration is not yet complete.")
+        for cb in self._config_callbacks:
+            cb()
+        if not self._config_messages:
+            logging.info(f"{self._name}: no configuration to send.")
             return
 
-        logging.debug("Sending button configuration commands to Arduino MCU...")
-        for cmd in self._button_config_commands:
-            # Parse button_count from command
-            parts = cmd.split()
-            params = {}
-            for part in parts:
-                if "=" in part:
-                    key, value = part.split("=")
-                    params[key] = value
-           
-            if cmd.startswith("buttons_add"):
-                # Extracted parameters
+        logging.debug(f"{self._name}: Sending configuration messages to Arduino MCU...")
+        for msg in self._config_messages:
+            # Parse command and params from message
+            self._comm.send_message(msg, True)                 
+
+        # Clear the list after sending
+        self._config_messages.clear()
+        
+    def add_config_cmd(self, cmd, is_init=False, on_restart=False):
+        """
+        store all configuration commands.
+        """
+        logging.debug(f"{self._name}: config command: {cmd}")
+        # Capture and save all relevant commands that relate to buttons (captured by buttons.py)
+        if cmd.startswith("buttons_add"):
+            params = self._comm.msgparser.parse(cmd)
+            if params:
                 oid = int(params.get("oid", 0))
                 pos = int(params.get("pos", 0))
                 pin = params.get("pin", "")
                 pull_up = int(params.get("pull_up", 0))
-                command = f"config_digital_in oid={oid} pos={pos} pin={pin} pullup={pull_up}"
-                self._comm.send_message(command, True)                 
-
-        # Clear the list after sending
-        self._button_config_commands.clear()
-        self._buttons_config_complete = False  # Reset the flag
-        
-    def add_config_cmd(self, cmd, is_init=False, on_restart=False):
-        """
-        Overridden method to capture all button-related configuration commands.
-        """
-        logging.debug(f"Captured config command: {cmd}")
-        # Store commands related to buttons
-        if cmd.startswith("config_buttons") or cmd.startswith("buttons_add") or cmd.startswith("buttons_query"):
-            self._button_config_commands.append(cmd)
-
-        # Check if the final command ("buttons_query") is captured
-        if cmd.startswith("buttons_query"):
-            self._buttons_config_complete = True
-            self._send_buttons_config()
+                snd_msg = f"config_digital_in oid={oid} pos={pos} pin={pin} pullup={pull_up}"
+                self._config_messages.append(snd_msg)
 
     def get_query_slot(self, oid):
         return 0
@@ -669,7 +775,7 @@ class ArduinoMCU:
         return self._printer
 
     def register_response(self, handler, command, oid=None):
-        logging.debug(f"Registering response handler: {command}")
+        logging.debug(f"{self._name}: Registering response handler: {command}")
         # Check if we need to replace the 'button_state' handler with the custom one
         if command == "buttons_state":
             # Replace with custom handler
@@ -703,21 +809,21 @@ class ArduinoMCU:
         pass
 
     def _handle_buttons_state(self, params):
-        logging.debug("custom handle_button_state")
+        logging.debug(f"{self._name}: custom handle_button_state")
 
     def _mcu_identify(self):
 
-        logging.info(f"Establishing {self._name} connection...")
+        logging.info(f"{self._name}: Establishing connection...")
         try:
             self._comm.connect()
-            logging.info(f"Connected to Arduino on {self._port}.")
+            logging.info(f"{self._name}: Connected to Arduino on {self._port}.")
 
             # register Arduino_mcu as 'mcu' to show it in SystemLoad panel
             mcu_name = 'mcu ' + self._name
             self._printer.add_object(mcu_name, self)
             
         except Exception as e:
-            self._respond_error(f"Failed to connect to Arduino: {e}\n check the connection to the MCU ", True)
+            self._respond_error(f"{self._name}: Failed to connect to Arduino: {e}\n check the connection to the MCU ", True)
 
     def get_status(self, eventtime):
         status = {
@@ -761,18 +867,17 @@ class ArduinoMCU:
 
     def _connect(self):
         """Connect to the Arduino"""
-        for cb in self._config_callbacks:
-            cb()
+        self._send_config()
 
     def _disconnect(self):
         """Disconnect from the Arduino."""
-        logging.info(f"Closing {self._name} connection...")
+        logging.info(f"{self._name}: Closing connection...")
         self._comm.disconnect()
-        logging.info(f"Disconnected from {self._name}.")
+        logging.info(f"{self._name}: Disconnected from.")
 
     def _firmware_restart(self):
         # Attempt reset via reset command
-        logging.info("Attempting Arduino MCU '%s' reset command", self._name)
+        logging.info("%s: Attempting Arduino MCU reset command", self._name)
         self._comm.send_message("restart")
         self._reactor.pause(self._reactor.monotonic() + 0.015)
         self._disconnect()
@@ -792,7 +897,7 @@ class ArduinoMCU:
         self._respond_error(f"Error from Arduino: {data}")
         
 class ArduinoMCUPin:
-    def __init__(self, mcu, pin_params):
+    def __init__(self, mcu: ArduinoMCU, pin_params):
         self._mcu = mcu
         self._name = pin_params['pin']
         self._pullup = pin_params['pullup']
@@ -807,7 +912,7 @@ class ArduinoMCUPin:
 class ArduinoMCU_digital_out(ArduinoMCUPin):
     def __init__(self, mcu, pin_params):
         ArduinoMCUPin.__init__(self, mcu, pin_params)
-        self._mcu.register_config_callback(self._send_pin_config)
+        self._mcu.register_config_callback(self._build_pin_config)
 
     def setup_max_duration(self, max_duration):
         pass
@@ -822,11 +927,11 @@ class ArduinoMCU_digital_out(ArduinoMCUPin):
         self._mcu._comm.send_message(command)
         logging.debug(f"sends to {self._mcu._name}: {command}")
 
-    def _send_pin_config(self):
+    def _build_pin_config(self):
         """ Sends the configuration for the digital pin to the Arduino MCU """
         command = f"config_digital_out pin={self._name} pullup={self._pullup} invert={self._invert}"
-        self._mcu._comm.send_message(command, True)
-        logging.debug(f"sends to {self._mcu._name}: {command}")
+        self._mcu.add_config_cmd(command)
+        logging.debug(f"{self._mcu._name}: Build config: {command}")
 
     def get_status(self, eventtime):
         return {
@@ -838,7 +943,7 @@ class ArduinoMCU_pwm(ArduinoMCUPin):
     def __init__(self, mcu, pin_params):
         ArduinoMCUPin.__init__(self, mcu, pin_params)
         self._cycle_time = 0.100
-        self._mcu.register_config_callback(self._send_pin_config)
+        self._mcu.register_config_callback(self._build_pin_config)
 
     def setup_max_duration(self, max_duration):
         pass
@@ -857,11 +962,11 @@ class ArduinoMCU_pwm(ArduinoMCUPin):
         self._mcu._comm.send_message(command)
         logging.debug(f"sends to {self._mcu._name}: {command}")
 
-    def _send_pin_config(self):
+    def _build_pin_config(self):
         """ Sends the configuration for the pwm pin to the Arduino MCU """
         command = f"config_pwm_out pin={self._name} cycle_time={self._cycle_time} start_value={self._value}"
-        self._mcu._comm.send_message(command, True)
-        logging.debug(f"sends to {self._mcu._name}: {command}")
+        self._mcu.add_config_cmd(command)
+        logging.debug(f"{self._mcu._name}: Build config: {command}")
 
     def get_status(self, eventtime):
         return {
@@ -880,8 +985,10 @@ class ArduinoMCU_adc(ArduinoMCUPin):
         self._report_time = 0.
         self._sample_count = 0
         self._range_check_count = 0
+        self._last_state = (0., 0.)
+        self._inv_max_adc = 0.
         printer = self._mcu.get_printer()
-        self._mcu.register_config_callback(self._send_pin_config)
+        self._mcu.register_config_callback(self._build_pin_config)
         printer.register_event_handler("klippy:connect",
                                             self.handle_connect)
 
@@ -910,15 +1017,21 @@ class ArduinoMCU_adc(ArduinoMCUPin):
             self._callback(eventtime, sample_value)
         return eventtime + 2.
     
-    def _send_pin_config(self):
+    def _build_pin_config(self):
         #logging.debug(f"{self._sample_time} / {self._sample_count} / {self._min_sample} / {self._max_sample} / {self._range_check_count}")
-        """ Sends the configuration for the analog input pin to the Arduino MCU """
+        """ build the configuration for the analog input pin for the Arduino MCU """
         command = f"config_analog_in pin={self._name}"
-        self._mcu._comm.send_message(command, True)
-        logging.debug(f"sends to {self._mcu._name}: {command}") 
+        self._mcu.add_config_cmd(command)
+        logging.debug(f"{self._mcu._name}: Build config: {command}")
 
     def _handle_analog_in_state(self, params):
-        pass
+        reactor = self._mcu.get_printer().get_reactor()
+        last_value = int(params['value'])
+        last_read_time = reactor.monotonic()
+        self._last_state = (last_value, last_read_time)
+        self._value = last_value
+        if self._callback is not None:
+            self._callback(last_read_time, last_value)        
 
     def get_status(self, eventtime):
         return {
