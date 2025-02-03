@@ -1,6 +1,31 @@
 #ifndef KLIPPER_COMM_H
 #define KLIPPER_COMM_H
 
+// default MCU Konstants
+// --------------------------------------------------
+#ifndef MCU_NAME 
+#define MCU_NAME "Unknown"          // mcu name
+#endif
+
+#ifndef MCU_FIRMWARE_VERSION
+#define MCU_FIRMWARE_VERSION "1.0"  // Version
+#endif
+
+#ifndef MCU_ADC_MAX
+#define MCU_ADC_MAX 1023           // ADC resolution (default 10Bit)
+#endif
+
+#ifndef MCU_ADC_SAMPLE_COUNT       
+#define MCU_ADC_SAMPLE_COUNT 1     // Totals of the measured values that are sent in summary form (for analog inputs)
+#endif
+
+#define MCU_CHIP "Unknown"    // MCU chip (not implementet yet)
+// --------------------------------------------------
+
+#ifndef MAX_COMMANDS
+#define MAX_COMMANDS  10              // Max number of commands processed by the MCU (handlers)
+#endif
+
 #include <Arduino.h>
 #include "map.h"
 
@@ -14,11 +39,9 @@
 #include <EthernetClient.h>
 #endif
 
+
 class KlipperComm {
 private:
-    String mcuName;                                   // Name of MCU
-    String mcuFirmwareVersion;                        // FirmwareVersion of MCU
-    String mcuChip;                                   // Chip
     Map<String, void (*)(const String&)> commandMap;  // Map for command callbacks
 
 #ifdef USE_WIFI
@@ -31,13 +54,6 @@ private:
     String ssid;
     String password;
 
-    bool connectToServer() {
-        if (client.connect(serverIP, serverPort)) {
-            return true;
-        } else {
-            return false;
-        }
-    }
 #endif
 
 #ifdef USE_ETHERNET
@@ -49,6 +65,9 @@ private:
     IPAddress gateway;                                //
     IPAddress subnet;                                 //
 
+#endif
+
+#if defined(USE_WIFI) or defined(USE_ETHERNET)
     bool connectToServer() {
         if (client.connect(serverIP, serverPort)) {
             return true;
@@ -59,10 +78,7 @@ private:
 #endif
 
 public:
-    KlipperComm(const String& mcuName, const String& mcuFirmwareVersion, uint8_t maxCommands)
-        : mcuName(mcuName), mcuFirmwareVersion(mcuFirmwareVersion), commandMap(maxCommands) {
-          mcuChip = "Unknown"; // TODO: get MCU chip with method
-        }
+    KlipperComm() : commandMap(MAX_COMMANDS) {}
 
 #if !defined(USE_ETHERNET) && !defined(USE_WIFI)
 
@@ -88,24 +104,24 @@ public:
 
     void begin(const String& serverIP, uint16_t serverPort, const char* ssid, const char* password, const String& local_IP, const String& gateway, const String& subnet) {
         if (!this->serverIP.fromString(serverIP))
-          Serial.println("invalid klipper server IP adress");
+          Serial.println(F("invalid klipper server IP adress"));
 
         this->serverPort = serverPort;
 
         if (!this->local_IP.fromString(local_IP))
-          Serial.println("invalid MCU IP adress");
+          Serial.println(F("invalid MCU IP adress"));
         
         if (!this->gateway.fromString(gateway))
-          Serial.println("invalid gateway IP adress");
+          Serial.println(F("invalid gateway IP adress"));
         
         if (!this->subnet.fromString(subnet))
-          Serial.println("invalid subnet mask IP adress");
+          Serial.println(F("invalid subnet mask IP adress"));
 
         this->ssid = ssid;
         this->password = password;
 
         if (!WiFi.config(this->local_IP, this->gateway, this->subnet)) {
-          Serial.println("Error when configuring the static IP address");
+          Serial.println(F("Error when configuring the static IP address"));
         }
         if (WiFi.status() != WL_CONNECTED) {
             WiFi.begin(this->ssid, this->password);
@@ -134,18 +150,18 @@ public:
 
     void begin(const String& serverIP, uint16_t serverPort, byte* mac, const String& local_IP, const String& gateway, const String& subnet) {
         if (!this->serverIP.fromString(serverIP))
-          Serial.println("invalid klipper server IP adress");
+          Serial.println(F("invalid klipper server IP adress"));
 
         this->serverPort = serverPort;
 
         if (!this->local_IP.fromString(local_IP))
-          Serial.println("invalid MCU IP adress");
+          Serial.println(F("invalid MCU IP adress"));
         
         if (!this->gateway.fromString(gateway))
-          Serial.println("invalid gateway IP adress");
+          Serial.println(F("invalid gateway IP adress"));
         
         if (!this->subnet.fromString(subnet))
-          Serial.println("invalid subnet mask IP adress");
+          Serial.println(F("invalid subnet mask IP adress"));
         
         for (int i = 0; i < 6; i++) this->mac[i] = mac[i];
 
@@ -186,7 +202,7 @@ public:
                     return;
                 }
             }
-            sendResponse("error: Command list full");
+            sendResponse(F("error: Command list full"));
         }
     }
 
@@ -214,7 +230,14 @@ public:
         }
 
         if (command == "identify") {
-            sendResponse("mcu=" + mcuName + " freq=" + F_CPU + " chip=" + mcuChip + " version=" + mcuFirmwareVersion);
+            String response = "mcu=" + String(MCU_NAME) + 
+                              " freq=" + String(F_CPU) + 
+                              " chip=" + String(MCU_CHIP) + 
+                              " version=" + String(MCU_FIRMWARE_VERSION) + 
+                              " adc_max=" + String(MCU_ADC_MAX) + 
+                              " adc_sample_count=" + String(MCU_ADC_SAMPLE_COUNT);
+
+            sendResponse(response);
             return;
         } else {
             splitIndex = input.indexOf(' ');
