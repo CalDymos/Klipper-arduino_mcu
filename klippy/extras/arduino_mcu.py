@@ -53,7 +53,7 @@ class MessageParser:
         Returns:
             str : The message if valid, otherwise empty str.
         """
-        logging.debug(f"{self._mcu_name}: Received data to validate: {data}")
+        logger._log_debug(f"{self._mcu_name}: Received data to validate: {data}")
         if "*" in data:
             msg, crc = data.rsplit("*", 1)
             try:
@@ -92,7 +92,7 @@ class MessageParser:
         Returns:
             dict: Parsed key-value parameters
         """
-        logging.debug(f"{self._mcu_name}: Received msg to parse: {msg}")
+        logger._log_debug(f"{self._mcu_name}: Received msg to parse: {msg}")
 
         if msg:
             # Parse parameters from msg
@@ -212,7 +212,7 @@ class CommunicationHandler(ABC):
         try:
 
             self._send_data(self._identify_cmd)
-            logging.debug(f"{self._mcu_name}: Sent init command: {self._identify_cmd.decode('utf-8').strip()}")
+            logger._log_debug(f"{self._mcu_name}: Sent init command: {self._identify_cmd.decode('utf-8').strip()}")
 
             # Check if there is any data available in the input buffer
             data = self._read_data()
@@ -289,14 +289,14 @@ class CommunicationHandler(ABC):
 
             while self.reactor.monotonic() - start_time < timeout:
                 if self._get_identify_data():
-                    logging.info("{self._mcu_name}: connection is ready.")
+                    logging.info(f"{self._mcu_name}: connection is ready.")
                     self.running = True
                     break
                 self.reactor.pause(self.reactor.monotonic() + 0.1)  # simple dirty solutions to avoid blocking the main thread completely
 
             if not self.running:
                 self._cleanup_connection()
-                raise TimeoutError("{self._mcu_name}: connection not ready within timeout period.")
+                raise TimeoutError(f"{self._mcu_name}: connection not ready within timeout period.")
 
             # Start threads for reading and writing
             self.read_thread = threading.Thread(target=self._read_thread)
@@ -518,7 +518,7 @@ class NetworkHandler(CommunicationHandler):
         try:
             return socket.gethostbyname(socket.gethostname())
         except Exception as e:
-            logging.error(f"Failed to get local IP address: {e}")
+            logging.error(f"{self._mcu_name}: Failed to get local IP address: {e}")
             return "127.0.0.1"
 
     def _validate_port(self, port):
@@ -534,7 +534,7 @@ class NetworkHandler(CommunicationHandler):
         # List of standard "klipper" ports to avoid        
         reserved_ports = {1883, 5000, 7125, 8080, 8819, 8883}
         if port in reserved_ports or port < 1024 or port > 65535:
-            logging.warning(f"Port {port} is reserved or invalid. Assigning default port.")
+            logging.warning(f"{self._mcu_name}: Port {port} is reserved or invalid. Assigning default port.")
             return 45800
         return port
 
@@ -542,11 +542,11 @@ class NetworkHandler(CommunicationHandler):
         self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.server_socket.bind((self.hostIp, self.port))
         self.server_socket.listen(1) # Accept one client at a time
-        logging.info(f"Server for {self._mcu_name} started on {self.hostIp}:{self.port}")
+        logging.info(f"{self._mcu_name}: Server started on {self.hostIp}:{self.port}")
 
         # Accept a client connection
         self.client_socket, self.client_address = self.server_socket.accept()
-        logging.info(f"Client connected from {self.client_address}")
+        logging.info(f"{self._mcu_name}: Client connected from {self.client_address}")
 
         self.selector.register(self.client_socket, selectors.EVENT_READ)
 
@@ -557,7 +557,7 @@ class NetworkHandler(CommunicationHandler):
         if self.server_socket:
             self.server_socket.close()
             self.server_socket = None
-        logging.info(f"Server for {self._mcu_name} stopped.")
+        logging.info(f"{self._mcu_name}: Server stopped.")
 
     def _read_data(self):
         """Reads network data using polling."""
@@ -583,7 +583,7 @@ class NetworkHandler(CommunicationHandler):
                 
                 return ""  # No complete message yet, keep waiting
             except Exception as e:
-                logging.error(f"Error when reading the data: {e}")
+                logging.error(f"{self._mcu_name}: Error when reading the data: {e}")
                 return ""
 
     def _send_data(self, data):
@@ -642,7 +642,7 @@ class SerialHandler(CommunicationHandler):
                 self.reactor.pause(self.reactor.monotonic() + 5.)
                 continue
 
-            logging.info(f"Connected to {self.port} at {self.baudrate} baud.")
+            logging.info(f"{self._mcu_name}: Connected to {self.port} at {self.baudrate} baud.")
             break
     def _cleanup_connection(self):
         if self.serial_dev:
@@ -667,7 +667,7 @@ class SerialHandler(CommunicationHandler):
                 return ""  # No complete line yet
             
             except (OSError, IOError, serial.SerialException) as e:
-                logging.error(f"Error reading from the serial port: {e}")
+                logging.error(f"{self._mcu_name}: Error reading from the serial port: {e}")
                 self.disconnect()  # Sicherstellen, dass die Verbindung korrekt getrennt wird
                 return ""
 
@@ -788,6 +788,8 @@ class ArduinoMCU:
                 pull_up = int(params.get("pull_up", 0))
                 snd_msg = f"config_digital_in oid={oid} pos={pos} pin={pin} pullup={pull_up}"
                 self._config_messages.append(snd_msg)
+        else:
+            self._config_messages.append(cmd)
 
     def get_constant(self, name: str, parser: type = str):
         if name not in self._mcu_const:
@@ -1041,7 +1043,8 @@ class ArduinoMCU_adc(ArduinoMCUPin):
         self._max_sample = 0.
         self._sample_time = 0
         self._report_time = 0.
-        self._sample_count = 0
+        self._adc_sample_count = 0
+        self._mcu_sample_count = 0
         self._range_check_count = 0
         self._last_state = (0., 0.)
         self._inv_max_adc = 0.
@@ -1054,15 +1057,16 @@ class ArduinoMCU_adc(ArduinoMCUPin):
     def setup_adc_sample(self, sample_time, sample_count,
                          minval=0., maxval=1., range_check_count=0):
         self._sample_time = sample_time
-        self._sample_count = sample_count
+        self._adc_sample_count = sample_count
         self._min_sample = minval
         self._max_sample = maxval
         self._range_check_count = range_check_count
     
     def _build_pin_config(self):
-        #logging.debug(f"{self._sample_time} / {self._sample_count} / {self._min_sample} / {self._max_sample} / {self._range_check_count}")
         """ build the configuration for the analog input pin for the Arduino MCU """
-        max_adc = self._sample_count * self._mcu.get_constant('adc_max', parser=float) * self._mcu.get_constant('adc_sample_count', parser=float)
+        self._mcu_sample_count = self._mcu.get_constant('adc_sample_count', parser=float)
+        mcu_adc_max = self._mcu.get_constant('adc_max', parser=float)
+        max_adc = self._mcu_sample_count * mcu_adc_max
         self._inv_max_adc = 1.0 / max_adc
         command = f"config_analog_in pin={self._name}"
         self._mcu.add_config_cmd(command)
