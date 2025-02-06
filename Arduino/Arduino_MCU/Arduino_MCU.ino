@@ -36,17 +36,20 @@ enum PinType {
   PIN_TYPE_DIN    // Digital in
 };
 
+// pin configurations
+#define DEFAULT_REPORT_TIME 2000 // ms
 struct PinConfig {
   uint8_t type;         // Pin Type 0=Digital OUT 1=PWM 2=Analog IN 3=Digital IN
   uint32_t cycleTime;   // PWM cycle time (only relevant for PWM)
   uint16_t startValue;  // Start value (only relevant for PWM and Digital Out)
   bool pullUp;          // Pull-up resistor (only for digital input pins)
   bool invert;          // Inverted logic (only for digital out pins)
-  uint32_t updateTime;  // Update interval in milliseconds
-  uint32_t lastUpdate;  // Last time the value was sent
+  uint32_t reportTime;  // report interval in milliseconds
+  uint32_t lastReportTime;  // Last time the value was sent
 };
 
-// last time for watchdog
+// watchdog definitions
+#define WATCHDOG_INTERVAL 5000 // ms
 unsigned long lastWatchdogTime = 0;  // Speichert die letzte Sendezeit
 
 // Map for pin configurations
@@ -58,13 +61,13 @@ void configurePin(const String& command, int type) {
 
     int pin = klipperComm.getParamValue(command, "pin").toInt();
     int nid = klipperComm.getParamValue(command, "nid").toInt();
-    int updateTime = klipperComm.getParamValue(command, "update_time").toInt();
-    if (updateTime <= 0) updateTime = 2000;
+    int reportTime = klipperComm.getParamValue(command, "report_time").toInt();
+    if (reportTime <= 0) reportTime = DEFAULT_REPORT_TIME;
 
     PinConfig config;
     config.type = type;
-    config.updateTime = updateTime;
-    config.lastUpdate = 0;
+    config.reportTime = reportTime;
+    config.lastReportTime = 0;
 
     if (type == PIN_TYPE_DOUT) {
       config.invert = klipperComm.getParamValue(command, "invert").toInt();
@@ -109,13 +112,13 @@ void setPinHandler(const String& command) {
 void sendWatchdogMsg() {
   // Send watchdog message every 5 seconds
   unsigned long currentTime = millis();
-  if (currentTime - lastWatchdogTime >= 5000) {
+  if (currentTime - lastWatchdogTime >= WATCHDOG_INTERVAL) {
     klipperComm.sendResponse("mcu_watchdog=1");
     lastWatchdogTime = currentTime;
   }
 }
 
-void sendPeriodicUpdates() {
+void sendPeriodicReports() {
   unsigned long currentTime = millis();
 
   // Iterate over the registered pins
@@ -124,9 +127,9 @@ void sendPeriodicUpdates() {
     int pin = pinEntry.getHash();
     PinConfig config = pinEntry.getValue();
 
-    // Check whether the update time for the pin has been reached
-    if (currentTime - config.lastUpdate >= config.updateTime) {
-      config.lastUpdate = currentTime;
+    // Check whether the report time for the pin has been reached
+    if (currentTime - config.lastReportTime >= config.reportTime) {
+      config.lastReportTime = currentTime;
 
       // Send the value based on the pin type
       if (config.type == PIN_TYPE_AIN) {
@@ -176,8 +179,8 @@ void loop() {
     klipperComm.handleCommand(input);
   }
 
-  // Periodic Updates for Inputs
-  sendPeriodicUpdates();
+  // Periodic Reports for Inputs
+  sendPeriodicReports();
 
   // watchdog
   sendWatchdogMsg();
