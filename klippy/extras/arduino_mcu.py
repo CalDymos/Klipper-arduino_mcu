@@ -157,7 +157,7 @@ MIN_POLL_TIMEOUT =  250  # ms
 DEFAULT_POLL_TIMEOUT = 1000 # ms (DEFAULT_REPORT_TIME / 2)
 
 class CommunicationHandler(ABC):
-    def __init__(self, reactor: Reactor, mcu_name, mcu_const: dict):
+    def __init__(self, reactor: 'Reactor', mcu_name, mcu_const: dict):
         """
         Base class for communication handlers.
 
