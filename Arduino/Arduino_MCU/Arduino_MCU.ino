@@ -1,11 +1,15 @@
 // #define USE_WIFI
 // #define USE_ETHERNET
-#define MCU_NAME "airfilter"        // mcu name
-#define MCU_FIRMWARE_VERSION "1.0"  // Version
-#define MCU_ADC_MAX 1023            // ADC resolution (default 10Bit)
-#define MCU_ADC_SAMPLE_COUNT 1      // Totals of the measured values that are sent in summary form (for analog inputs)
-#define MAX_COMMANDS 6              // Max number of commands processed by the MCU (handlers)
+
+const char* MCU_NAME = "airfilter";        // mcu name
+const char* MCU_FIRMWARE_VERSION = "1.0";  // Version
+const char* MCU_ADC_MAX = "1023";            // ADC resolution (default 10Bit)
+const char* MCU_ADC_SAMPLE_COUNT = "1";      // Totals of the measured values that are sent in summary form (for analog inputs)
+const char* MCU_CHIP = "ATmega328P";         // MCU chip
+
+#define MAX_CMDS 6                  // Max number of commands processed by the MCU (handlers)
 #define MAX_PIN_CONFIGURATIONS 10   // Max number of pin configurations
+
 #include "KlipperComm.h"
 
 // is only required for communication via LAN or WLAN
@@ -36,16 +40,25 @@ enum PinType {
   PIN_TYPE_DIN    // Digital in
 };
 
+enum PinReturnType {
+  RETURN_TYPE_TEMP,   // temperature (°C)
+  RETURN_TYPE_HUM,    // humidity (%)
+  RETURN_TYPE_PRES,   // pressure (hPa)
+  RETURN_TYPE_GAS,    // gas 
+  RETURN_TYPE_FREQ    // frequency (Hz)
+};
+
 // pin configurations
 #define DEFAULT_REPORT_TIME 2000 // ms
 struct PinConfig {
-  uint8_t type;         // Pin Type 0=Digital OUT 1=PWM 2=Analog IN 3=Digital IN
-  uint32_t cycleTime;   // PWM cycle time (only relevant for PWM)
-  uint16_t startValue;  // Start value (only relevant for PWM and Digital Out)
-  bool pullUp;          // Pull-up resistor (only for digital input pins)
-  bool invert;          // Inverted logic (only for digital out pins)
-  uint32_t reportTime;  // report interval in milliseconds
-  uint32_t lastReportTime;  // Last time the value was sent
+  uint8_t type;           // Pin Type 0=Digital OUT 1=PWM 2=Analog IN 3=Digital IN
+  uint8_t retType;        // Return type to Klipper for input pins 0=temp 1=humidity 3=pressure 4=gas 5=freq
+  uint32_t cycleTime;     // PWM cycle time (only relevant for PWM)
+  uint16_t startValue;    // Start value (only relevant for PWM and Digital Out)
+  bool pullUp;            // Pull-up resistor (only for digital input pins)
+  bool invert;            // Inverted logic (only for digital out pins)
+  uint32_t reportTime;    // report interval in milliseconds
+  uint32_t lastReportTime;// Last time the value was sent
 };
 
 // watchdog definitions
@@ -56,12 +69,15 @@ unsigned long lastWatchdogTime = 0;  // Speichert die letzte Sendezeit
 Map<int, PinConfig> pinConfigurations(MAX_PIN_CONFIGURATIONS);
 uint8_t pinCount = 0;
 
-void configurePin(const String& command, int type) {
+// Received message size
+uint8_t recvMsgSize;
+
+void handleConfigPin(const char* msg, int type) {
   if (pinCount <= pinConfigurations.getSize()) {
 
-    int pin = klipperComm.getParamValue(command, "pin").toInt();
-    int nid = klipperComm.getParamValue(command, "nid").toInt();
-    int reportTime = klipperComm.getParamValue(command, "report_time").toInt();
+    int pin = atoi(klipperComm.getParamValue(msg, PARAM_PIN));
+    int nid = atoi(klipperComm.getParamValue(msg, PARAM_NID));
+    int reportTime = atoi(klipperComm.getParamValue(msg, PARAM_REPORT_TIME));
     if (reportTime <= 0) reportTime = DEFAULT_REPORT_TIME;
 
     PinConfig config;
@@ -70,33 +86,34 @@ void configurePin(const String& command, int type) {
     config.lastReportTime = 0;
 
     if (type == PIN_TYPE_DOUT) {
-      config.invert = klipperComm.getParamValue(command, "invert").toInt();
+      config.invert = atoi(klipperComm.getParamValue(msg, PARAM_INVERT));
       pinMode(pin, OUTPUT);
     } else if (type == PIN_TYPE_PWM) {
-      config.cycleTime = klipperComm.getParamValue(command, "cycle_time").toInt();
-      config.startValue = klipperComm.getParamValue(command, "start_value").toInt();
+      config.cycleTime = atoi(klipperComm.getParamValue(msg, PARAM_CYCLE_TIME));
+      config.startValue = atoi(klipperComm.getParamValue(msg, PARAM_START_VALUE));
       pinMode(pin, OUTPUT);
       analogWrite(pin, config.startValue);
     } else if (type == PIN_TYPE_AIN || type == PIN_TYPE_DIN) {
-      config.pullUp = klipperComm.getParamValue(command, "pullup").toInt();
+      config.pullUp = atoi(klipperComm.getParamValue(msg, PARAM_PULLUP));
       pinMode(pin, config.pullUp ? INPUT_PULLUP : INPUT);
     }
 
     pinConfigurations[pin](pin, config);
     pinCount++;
-    klipperComm.sendResponse("ok nid=" + String(nid));
+    snprintf(klipperComm.msgBuffer, MAX_BUFFER_LEN, "%c %c%u", RE_ACK, PARAM_NID, nid);
 
   } else {
-    klipperComm.sendResponse(F("error: Pin list full"));
+    strcpy(klipperComm.msgBuffer, "error: Pin list full");
   }
+  klipperComm.sendResponse();
 }
 
-void setPinHandler(const String& command) {
-  int pin = klipperComm.getParamValue(command, "pin").toInt();
-  int value = klipperComm.getParamValue(command, "value").toInt();
+void handleSetPin(const char* command) {
+  int pin = atoi(klipperComm.getParamValue(command, PARAM_PIN));
+  int value = atoi(klipperComm.getParamValue(command, PARAM_VALUE));
 
   if (pinConfigurations.indexOf(pin) == pinConfigurations.getSize()) {
-    klipperComm.sendResponse(F("error: pin not configured"));
+    klipperComm.sendResponse("error: Pin list full");
     return;
   }
 
@@ -113,7 +130,8 @@ void sendWatchdogMsg() {
   // Send watchdog message every 5 seconds
   unsigned long currentTime = millis();
   if (currentTime - lastWatchdogTime >= WATCHDOG_INTERVAL) {
-    klipperComm.sendResponse("mcu_watchdog=1");
+    snprintf(klipperComm.msgBuffer, MAX_BUFFER_LEN, "%c %c1", RE_WATCHDOG, PARAM_MCU_WATCHDOG);
+    klipperComm.sendResponse();
     lastWatchdogTime = currentTime;
   }
 }
@@ -134,10 +152,12 @@ void sendPeriodicReports() {
       // Send the value based on the pin type
       if (config.type == PIN_TYPE_AIN) {
         int analogValue = analogRead(pin);
-        klipperComm.sendResponse("analog_in_state pin=" + String(pin) + " value=" + String(analogValue));
+        snprintf(klipperComm.msgBuffer, MAX_BUFFER_LEN, "%c %c%u;%c%u", RE_ANALOG_IN_STATE, PARAM_PIN, pin, PARAM_VALUE, analogValue);
+        klipperComm.sendResponse();
       } else if (config.type == PIN_TYPE_DIN) {
         int digitalValue = digitalRead(pin);
-        klipperComm.sendResponse("digital_in_state pin=" + String(pin) + " value=" + String(digitalValue));
+        snprintf(klipperComm.msgBuffer, MAX_BUFFER_LEN, "%c %c%u;%c%u", RE_BUTTONS_STATE, PARAM_PIN, pin, PARAM_VALUE, digitalValue);
+        klipperComm.sendResponse();
       }
 
       // Update the configuration in the map
@@ -158,25 +178,25 @@ void setup() {
 
 
   // Register commands
-  klipperComm.registerCommand(F("config_analog_in"), [](const String& cmd) {
-    configurePin(cmd, PIN_TYPE_AIN);
+  klipperComm.registerCommand(CMD_CONFIG_ANALOG_IN, [](const char* cmd) {
+    handleConfigPin(cmd, PIN_TYPE_AIN);
   });
-  klipperComm.registerCommand(F("config_pwm_out"), [](const String& cmd) {
-    configurePin(cmd, PIN_TYPE_PWM);
+  klipperComm.registerCommand(CMD_CONFIG_PWM_OUT, [](const char* cmd) {
+    handleConfigPin(cmd, PIN_TYPE_PWM);
   });
-  klipperComm.registerCommand(F("config_digital_out"), [](const String& cmd) {
-    configurePin(cmd, PIN_TYPE_DOUT);
+  klipperComm.registerCommand(CMD_CONFIG_DIGITAL_OUT, [](const char* cmd) {
+    handleConfigPin(cmd, PIN_TYPE_DOUT);
   });
-  klipperComm.registerCommand(F("config_digital_in"), [](const String& cmd) {
-    configurePin(cmd, PIN_TYPE_DIN);
+  klipperComm.registerCommand(CMD_CONFIG_BUTTONS, [](const char* cmd) {
+    handleConfigPin(cmd, PIN_TYPE_DIN);
   });
-  klipperComm.registerCommand(F("set_pin"), setPinHandler);
+  klipperComm.registerCommand(CMD_SET_PIN, handleSetPin);
 }
 
 void loop() {
   if (klipperComm.available()) {
-    String input = klipperComm.readCommand();
-    klipperComm.handleCommand(input);
+    klipperComm.readMsg(recvMsgSize);
+    klipperComm.handleCommand();
   }
 
   // Periodic Reports for Inputs

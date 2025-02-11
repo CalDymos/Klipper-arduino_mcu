@@ -1,30 +1,63 @@
 #ifndef KLIPPER_COMM_H
 #define KLIPPER_COMM_H
 
-// default MCU Konstants
+// MCU definitions (Konstants)
 // --------------------------------------------------
-#ifndef MCU_NAME 
-#define MCU_NAME "Unknown"          // mcu name
-#endif
-
-#ifndef MCU_FIRMWARE_VERSION
-#define MCU_FIRMWARE_VERSION "1.0"  // Version
-#endif
-
-#ifndef MCU_ADC_MAX
-#define MCU_ADC_MAX 1023           // ADC resolution (default 10Bit)
-#endif
-
-#ifndef MCU_ADC_SAMPLE_COUNT       
-#define MCU_ADC_SAMPLE_COUNT 1     // Totals of the measured values that are sent in summary form (for analog inputs)
-#endif
-
-#define MCU_CHIP "Unknown"    // MCU chip (not implementet yet)
+extern const char* MCU_NAME;          // mcu name
+extern const char* MCU_FIRMWARE_VERSION;  // Version
+extern const char* MCU_ADC_MAX;           // ADC resolution (default 10Bit)
+extern const char* MCU_ADC_SAMPLE_COUNT;     // Totals of the measured values that are sent in summary form (for analog inputs)
+extern const char* MCU_CHIP;    // MCU chip
 // --------------------------------------------------
 
-#ifndef MAX_COMMANDS
-#define MAX_COMMANDS  10              // Max number of commands processed by the MCU (handlers)
+#define MAX_BUFFER_LEN 128
+
+#ifndef MAX_CMDS
+#define MAX_CMDS  6              // Max number of commands processed by the MCU (handlers)
+#elif MAX_CMDS < 6
+#undef MAX_CMDS
+#define MAX_CMDS 6
 #endif
+
+// Default Commands and Parameter Mapping
+// !! If these definitions are changed, arduino_mcu.py must also be adjusted. !!
+
+// Input Commands
+#define CMD_CONFIG_ANALOG_IN   "\x80"
+#define CMD_CONFIG_PWM_OUT     "\x81"
+#define CMD_CONFIG_DIGITAL_OUT "\x82"
+#define CMD_CONFIG_BUTTONS     "\x83"
+#define CMD_SET_PIN            "\x84"
+#define CMD_IDENTIFY           "\x85"
+
+// Responses
+#define RE_ACK                 "\xA0"
+#define RE_WATCHDOG            "\xA1"
+#define RE_ANALOG_IN_STATE     "\xA2"
+#define RE_BUTTONS_STATE       "\xA3"
+#define RE_COUNTER_STATE       "\xA4"
+
+// Parameters
+#define PARAM_MCU_WATCHDOG     "\xB0"
+#define PARAM_OID              "\xB1"
+#define PARAM_PIN              "\xB2"
+#define PARAM_PULLUP           "\xB3"
+#define PARAM_INVERT           "\xB4"
+#define PARAM_VALUE            "\xB5"
+#define PARAM_VALUE_2          "\xB6"
+#define PARAM_VALUE_3          "\xB7"
+#define PARAM_VALUE_4          "\xB8"
+#define PARAM_MCU              "\xB9"
+#define PARAM_FREQ             "\xBA"
+#define PARAM_CHIP             "\xBB"
+#define PARAM_VERSION          "\xBC"
+#define PARAM_ADC_MAX          "\xBD"
+#define PARAM_ADC_SAMPLE_COUNT "\xBE"
+#define PARAM_NID              "\xBF"
+#define PARAM_REPORT_TIME      "\xC0"
+#define PARAM_CYCLE_TIME       "\xC1"
+#define PARAM_START_VALUE      "\xC2"
+// --------------------------------------------------
 
 #include <Arduino.h>
 #include "map.h"
@@ -42,7 +75,7 @@
 
 class KlipperComm {
 private:
-    Map<String, void (*)(const String&)> commandMap;  // Map for command callbacks
+    Map<const char*, void (*)(const char*)> commandMap;  // Map for command callbacks
 
 #ifdef USE_WIFI
     WiFiClient client;                                // WiFi client for network communicatio
@@ -51,8 +84,8 @@ private:
     IPAddress local_IP;                               // static IP of MCU
     IPAddress gateway;                                // 
     IPAddress subnet;                                 //
-    String ssid;
-    String password;
+    char ssid[32];
+    char password[32];
 
 #endif
 
@@ -78,7 +111,10 @@ private:
 #endif
 
 public:
-    KlipperComm() : commandMap(MAX_COMMANDS) {}
+    char msgBuffer[MAX_BUFFER_LEN];            // buffer for in/out messages
+    KlipperComm() : commandMap(MAX_CMDS) {
+      msgBuffer[0] = '\0';
+    }
 
 #if !defined(USE_ETHERNET) && !defined(USE_WIFI)
 
@@ -90,14 +126,43 @@ public:
         return Serial.available();
     }
 
-    String readCommand() {
-        return Serial.readStringUntil('\n');
+    char* readMsg(uint8_t& length) {
+        static uint8_t bufferIndex = 0;
+        while (Serial.available()) {
+            char c = Serial.read();
+            if (c == '\n') {
+                msgBuffer[bufferIndex] = '\0';
+                length = bufferIndex;
+                return msgBuffer;
+            } else if (bufferIndex < sizeof(msgBuffer) - 1) {
+                msgBuffer[bufferIndex++] = c;
+            }
+        }
+        length = 0;
+        return nullptr;
     }
 
-    void sendResponse(const String& response) {
-        int checksum = calculateChecksum(response);
-        Serial.print(response + "*" + String(checksum) + "\n");
+    void sendResponse() {
+      sendResponse(msgBuffer);
     }
+
+    void sendResponse(const char* response) {
+        uint8_t checksum = calculateChecksum(response);
+        size_t len = strlen(response);
+
+        // Check whether response is already msgBuffer and space for checksum "*123\n" = 6 Byte
+        if (response == msgBuffer && len + 6 < sizeof(msgBuffer)) {
+            snprintf(msgBuffer + len, sizeof(msgBuffer) - len, "*%d\n", checksum);
+        } else if (len + 6 < sizeof(msgBuffer)) { // If 'response' is a different string, format normally
+            snprintf(msgBuffer, sizeof(msgBuffer), "%s*%d\n", response, checksum);
+        } else {
+            sendResponse("error: message too long");
+            return;          
+        }
+
+        Serial.print(msgBuffer);
+    }
+
 #endif
 
 #ifdef USE_WIFI
@@ -136,13 +201,41 @@ public:
         return client.available();
     }
 
-    String readCommand() {
-        return client.readStringUntil('\n');
+    char* readMsg(uint8_t& length) {
+        static uint8_t bufferIndex = 0;
+        while (client.available()) {
+            char c = client.read();
+            if (c == '\n') {
+                msgBuffer[bufferIndex] = '\0';
+                length = bufferIndex;
+                return msgBuffer;
+            } else if (bufferIndex < sizeof(msgBuffer) - 1) {
+                msgBuffer[bufferIndex++] = c;
+            }
+        }
+        length = 0;
+        return nullptr;
     }
 
-    void sendResponse(const String& response) {
-        int checksum = calculateChecksum(response);
-        client.print(response + "*" + String(checksum) + "\n");
+    void sendResponse() {
+      sendResponse(msgBuffer);
+    }
+
+    void sendResponse(const char* response) {
+        uint8_t checksum = calculateChecksum(response);
+        size_t len = strlen(response);
+
+        // Check whether response is already msgBuffer and space for checksum "*123\n" = 6 Byte
+        if (response == msgBuffer && len + 6 < sizeof(msgBuffer)) {
+            snprintf(msgBuffer + len, sizeof(msgBuffer) - len, "*%d\n", checksum);
+        } else if (len + 6 < sizeof(msgBuffer)) { // If 'response' is a different string, format normally
+            snprintf(msgBuffer, sizeof(msgBuffer), "%s*%d\n", response, checksum);
+        } else {
+            sendResponse("error: message too long");
+            return;          
+        }
+
+        client.print(msgBuffer);
     }
 #endif
 
@@ -173,83 +266,125 @@ public:
         return client.available();
     }
 
-    String readCommand() {
-        return client.readStringUntil('\n');
+    char* readMsg(uint8_t& length) {
+        static uint8_t bufferIndex = 0;
+        while (client.available()) {
+            char c = client.read();
+            if (c == '\n') {
+                msgBuffer[bufferIndex] = '\0';
+                length = bufferIndex;
+                bufferIndex = 0;
+                return msgBuffer;
+            } else if (bufferIndex < sizeof(msgBuffer) - 1) {
+                msgBuffer[bufferIndex++] = c;
+            } else {
+                bufferIndex = 0;
+            }
+        }
+        length = 0;
+        return nullptr;
     }
 
-    void sendResponse(const String& response) {
-        int checksum = calculateChecksum(response);
-        client.print(response + "*" + String(checksum) + "\n");
+    void sendResponse() {
+      sendResponse(msgBuffer);
+    }
+
+    void sendResponse(const char* response) {
+        uint8_t checksum = calculateChecksum(response);
+        size_t len = strlen(response);
+
+        // Check whether response is already msgBuffer and space for checksum "*123\n" = 6 Byte
+        if (response == msgBuffer && len + 6 < sizeof(msgBuffer)) {
+            snprintf(msgBuffer + len, sizeof(msgBuffer) - len, "*%d\n", checksum);
+        } else if (len + 6 < sizeof(msgBuffer)) { // If 'response' is a different string, format normally
+            snprintf(msgBuffer, sizeof(msgBuffer), "%s*%d\n", response, checksum);
+        } else {
+            sendResponse("error: message too long");
+            return;          
+        }
+
+        client.print(msgBuffer);
     }
 #endif
 
-    int calculateChecksum(const String& command) {
-        int calculatedChecksum = 0;
-        for (int i = 0; i < command.length(); i++) {
-            calculatedChecksum += command[i];
+    uint8_t calculateChecksum(const char* command) {
+        int checksum = 0;
+        while (*command) {
+            checksum += (unsigned char)*command++;  // Summiere die Byte-Werte der Zeichen
         }
-        return calculatedChecksum % 256;
+        return (uint8_t)(checksum % 256);  // Limit the result to 8 bits
     }
 
-    void registerCommand(const String& command, void (*func)(const String&)) {
+
+    void registerCommand(const char* command, void (*func)(const char*)) {
         uint8_t index = commandMap.indexOf(command);
         if (index < commandMap.getSize()) {
             commandMap[index](command, func);
         } else {
             for (uint8_t i = 0; i < commandMap.getSize(); i++) {
-                if (commandMap[i].getHash() == "") {  // Empty slot
+                if (commandMap[i].getHash()[0] == '\0') {  // Empty slot
                     commandMap[i](command, func);
                     return;
                 }
             }
-            sendResponse(F("error: Command list full"));
+            sendResponse("error: Command list full");
         }
     }
 
-    String getParamValue(const String& command, const String& paramName) {
-        int start = command.indexOf(paramName + "=");
-        if (start == -1) return "";  // Parameter not found
-        int end = command.indexOf(' ', start);
-        if (end == -1) end = command.length();
-        return command.substring(start + paramName.length() + 1, end);
+    char* getParamValue(const char* msg, const char* paramKey) {
+        char* start = strstr(msg, paramKey);
+        if (!start) return 0;  // Parameter not found
+        start += 1; // Move past paramKey
+        char* end = strchr(start, ';');
+        if (!end) end = start + strlen(start);
+        static char value[32];
+        strncpy(value, start, end - start);
+        value[end - start] = '\0';
+        return value;
     }
 
-    void handleCommand(const String& input) {
-        int splitIndex = input.indexOf('*');
-        if (splitIndex == -1) {
+
+    void handleCommand() {
+        char* splitPtr = strchr(msgBuffer, '*');
+        if (!splitPtr) {
             sendResponse("error: no checksum");
             return;
         }
 
-        String command = input.substring(0, splitIndex);
-        int checksum = input.substring(splitIndex + 1).toInt();
+        int splitIndex = splitPtr - msgBuffer;
+        char* checksumStr = &msgBuffer[splitIndex + 1];
 
-        if (checksum != calculateChecksum(command)) {
-            sendResponse("error: checksum mismatch");
+        char* endPtr;
+        int checksum = strtol(checksumStr, &endPtr, 10);
+        if (endPtr == checksumStr) { 
+            sendResponse("error: invalid checksum");
             return;
         }
 
-        if (command == "identify") {
-            String response = "mcu=" + String(MCU_NAME) + 
-                              " freq=" + String(F_CPU) + 
-                              " chip=" + String(MCU_CHIP) + 
-                              " version=" + String(MCU_FIRMWARE_VERSION) + 
-                              " adc_max=" + String(MCU_ADC_MAX) + 
-                              " adc_sample_count=" + String(MCU_ADC_SAMPLE_COUNT);
+        msgBuffer[splitIndex] = '\0'; // Separate main message in the message buffer
 
-            sendResponse(response);
+        if (checksum != calculateChecksum(msgBuffer)) {
+            sendResponse("error: checksum mismatch");
             return;
+        }
+      
+        if ((uint8_t)msgBuffer[0] == (uint8_t)CMD_IDENTIFY[0]) {
+            snprintf(msgBuffer, sizeof(msgBuffer), "%c%s %c%lu;%c%s;%c%s;%c%d;%c%d", 
+                     PARAM_MCU, MCU_NAME, PARAM_FREQ, F_CPU, PARAM_CHIP, MCU_CHIP, 
+                     PARAM_VERSION, MCU_FIRMWARE_VERSION, PARAM_ADC_MAX, MCU_ADC_MAX, 
+                     PARAM_ADC_SAMPLE_COUNT, MCU_ADC_SAMPLE_COUNT);
+            sendResponse();
         } else {
-            splitIndex = input.indexOf(' ');
-            if (splitIndex != -1) {
-                String funcName = input.substring(0, splitIndex);
-                uint8_t index = commandMap.indexOf(funcName);
-                if (index < commandMap.getSize()) {
-                    void (*func)(const String&) = commandMap[index].getValue();
-                    if (func) {
-                        func(command);
-                        return;
-                    }
+            splitPtr = strchr(msgBuffer, ' ');
+            if (splitPtr) {
+                *splitPtr = '\0'; // Separate command from Message
+                char* command = msgBuffer;
+                char* params = splitPtr + 1;
+
+                void (*func)(const char*) = commandMap.valueOf(command, nullptr);
+                if (func) {
+                    func(params);
+                    return;
                 }
             }
         }

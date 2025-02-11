@@ -1169,12 +1169,7 @@ class ArduinoMCU_adc(ArduinoMCUPin):
     def __init__(self, mcu, pin_params):
         ArduinoMCUPin.__init__(self, mcu, pin_params)
         self._callback = None
-        self._number_of_values = 1 # default is one value, 4 are currently supported,
-                                   # The sensor values received are interpreted as follows.
-                                   # value = temperature
-                                   # value2 = humidity
-                                   # value3 = pressure
-                                   # value4 = gas
+
         self._min_sample = 0.
         self._max_sample = 0.
         self._sample_time = 0
@@ -1207,7 +1202,7 @@ class ArduinoMCU_adc(ArduinoMCUPin):
         mcu_adc_max = self._mcu.get_constant('adc_max', parser=float)
         max_adc = self._mcu_sample_count * mcu_adc_max
         self._inv_max_adc = 1.0 / max_adc
-        command = f"config_analog_in oid={self._oid} pin={self._name} nval={self._number_of_values}"
+        command = f"config_analog_in oid={self._oid} pin={self._name}"
         self._mcu.add_config_cmd(command)
         logging.debug(f"{self._mcu._name}: Build config: {command}")
         self._mcu.register_response(self._handle_analog_in_state,
