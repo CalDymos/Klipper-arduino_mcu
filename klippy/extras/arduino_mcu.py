@@ -39,8 +39,47 @@ class logger:
             timestamp = time.strftime('%Y-%m-%d %H:%M:%S', local_time)
             logging.debug(f"{timestamp}.{milliseconds} {message}")
 
-
 class MessageParser:
+    # Default output Commands and Parameter Mapping
+    # !! If these definitions are changed, klipperComm.h must also be adjusted. !!
+    COMMANDS = {
+        "CONFIG_ANALOG_IN": b"\x80",
+        "CONFIG_PWM_OUT": b"\x81",
+        "CONFIG_DIGITAL_OUT": b"\x82",
+        "CONFIG_BUTTONS": b"\x83",
+        "SET_PIN": b"\x84",
+        "IDENTIFY": b"\x85",
+    }
+
+    RESPONSES = {
+        "ACK": b"\xA0",
+        "WATCHDOG": b"\xA1",
+        "ANALOG_IN_STATE": b"\xA2",
+        "BUTTONS_STATE": b"\xA3",
+        "COUNTER_STATE": b"\xA4",
+    }
+
+    PARAMETERS = {
+        "MCU_WATCHDOG": b"\xB0",
+        "OID": b"\xB1",
+        "PIN": b"\xB2",
+        "PULLUP": b"\xB3",
+        "INVERT": b"\xB4",
+        "VALUE": b"\xB5",
+        "VALUE_2": b"\xB6",
+        "VALUE_3": b"\xB7",
+        "VALUE_4": b"\xB8",
+        "MCU": b"\xB9",
+        "FREQ": b"\xBA",
+        "CHIP": b"\xBB",
+        "VERSION": b"\xBC",
+        "ADC_MAX": b"\xBD",
+        "ADC_SAMPLE_COUNT": b"\xBE",
+        "NID": b"\xBF",
+        "REPORT_TIME": b"\xC0",
+        "CYCLE_TIME": b"\xC1",
+        "START_VALUE": b"\xC2",
+    }
     def __init__(self, mcu_name: str = ""):
         """
         class to parse the data getting from device.
@@ -112,30 +151,50 @@ class MessageParser:
 
         if msg:
             # Parse parameters from msg
-            parts = msg.split()
+            byteMsg: bytes = msg.encode("utf-8")
             params = {}
-            for part in parts:
-                if "=" in part:
-                    key, value = part.split("=")
-                    params[key] = value
+            i = 0
+            length = len(byteMsg)
+            
+            while i < length:
+                key = byteMsg[i:i+1] # Read parameter byte
+                i += 1
+                value = bytearray()
+                
+                #  Read value until the next parameter or end of message
+                while i < length and byteMsg[i:i+1] != b";":
+                    value.append(byteMsg[i])
+                    i += 1   
+
+                # Skip ";" if present
+                if i < length and byteMsg[i:i+1] == b";":
+                    i += 1       
+                                              
+                try:
+                    decoded_value = value.decode("utf-8")
+                except UnicodeDecodeError:
+                    decoded_value = bytes(value)
+
+                params[key] = decoded_value
+                
             return params
 
         return {}
     
     def create_cmd(self, command: str) -> bytes:
         """
-        Creates a properly formatted command with checksum and newline.
+        Creates a properly formatted msg with checksum and newline.
 
         Args:
-            command (str): The base command string to send.
+            msg (str): The base command string to send.
 
         Returns:
-            bytes: The full command string with checksum and newline, encoded asa UTF-8.
+            bytes: The full message string with checksum and newline, encoded as UTF-8.
         """
         checksum = self._calculate_checksum(command)
         return f"{command}*{checksum}\n".encode("utf-8")
     
-    def get_cmd(self, msg: str) -> str:
+    def get_cmd(self, data: str) -> str:
         """
         Extracts the command part from a valid message.
 
@@ -146,9 +205,9 @@ class MessageParser:
             str : The command if valid, otherwise empty str.
         """
 
-        if msg:
-            cmd = msg.split(" ", 1)[0]
-            return cmd.rstrip(":") #removes trailing ':' (if exists) and return command
+        if data:
+            cmd = data.split(" ", 1)[0]
+            return cmd.rstrip(":") #removes trailing ':' (if exists) and return command byte
 
         return ""
 
@@ -169,7 +228,11 @@ class CommunicationHandler(ABC):
         self._reactor = reactor
         self._mcu_name = mcu_name
         
-        self._msgparser = MessageParser(self._mcu_name)
+        self.msgparser = MessageParser(self._mcu_name)
+        self.PARAM = self.msgparser.PARAMETERS
+        self.CMD = self.msgparser.COMMANDS
+        self.RESP = self.msgparser.RESPONSES
+        
         self._partial_data = ""  # Buffer für unvollständige Nachrichten
 
         # dict for MCU constants
@@ -197,7 +260,7 @@ class CommunicationHandler(ABC):
         self._last_notify_id = 0
         self._pending_notifications = {}
 
-        self._identify_cmd = self._msgparser.create_cmd("identify")
+        self._identify_cmd = self.msgparser.create_cmd("identify")
 
     @abstractmethod
     def _read_data(self) -> str:
@@ -241,14 +304,14 @@ class CommunicationHandler(ABC):
             if data:
                 
                 # validate CRC and Parse the message
-                params = self._msgparser.parse(self._msgparser.validate(data))
+                params = self.msgparser.parse(self.msgparser.validate(data))
                 if params:
-                    if params.get('mcu', '') == self._mcu_name:
-                        self._mcu_const['chip'] = params.get('chip', 'Unknown')
-                        self._mcu_const['version'] = params.get('version', 'Unknown')
-                        self._mcu_const['freq'] = params.get('freq', 0)
-                        self._mcu_const['adc_max'] = params.get('adc_max', 1)
-                        self._mcu_const['adc_sample_count'] = params.get('adc_sample_count', 1)
+                    if params.get(self.PARAM["MCU"], '') == self._mcu_name:
+                        self._mcu_const['chip'] = params.get(self.PARAM["CHIP"], 'Unknown')
+                        self._mcu_const['version'] = params.get(self.PARAM["VERSION"], 'Unknown')
+                        self._mcu_const['freq'] = params.get(self.PARAM["FREQ"], 0)
+                        self._mcu_const['adc_max'] = params.get(self.PARAM["ADC_MAX"], 1)
+                        self._mcu_const['adc_sample_count'] = params.get(self.PARAM["ADC_SAMPLE_COUNT"], 1)
                         self._reactor.pause(self._reactor.monotonic() + 0.1)
                         self._reset_device_input_buffer()
                         return True
@@ -295,7 +358,7 @@ class CommunicationHandler(ABC):
                     # Get the next message to send
                     message = self._outgoing_queue.get()
 
-                    full_msg = self._msgparser.create_cmd(message)
+                    full_msg = self.msgparser.create_cmd(message)
                     self._send_data(full_msg)
                     logger.debug(f"{self._mcu_name}: Sent message: {full_msg.strip()}")
 
@@ -362,22 +425,28 @@ class CommunicationHandler(ABC):
                 logger.debug(f"{self._mcu_name}: Processing message: {data}")
 
                 # CRC check
-                msg = self._msgparser.validate(data)
+                msg = self.msgparser.validate(data)
                 if not msg:
                     continue
+                
+                # get command
+                cmd = self.msgparser.get_cmd(data)
+                if not cmd:
+                    continue
+                
                 # Parse the message
-                params = self._msgparser.parse(msg)
+                params = self.msgparser.parse(msg)
                 if not params:
                     continue
 
-                # simple check for the watchdog confirmation message
-                if "mcu_watchdog" in params:
+                # simple check for the watchdog message
+                if cmd == self.CMD["WATCHDOG"] and self.PARAM["MCU_WATCHDOG"] in params:
                     self.last_response_time = self._reactor.monotonic()  # reset Watchdog zurücksetzen
                     logger.debug(f"{self._mcu_name}: Watchdog-Reset durch MCU")
                     continue
 
                 # Check for notification ID (NID)
-                nid = int(params.get("nid", 0))
+                nid = int(params.get(self.PARAM["NID"], 0))
                 if nid:
                     if nid in self._pending_notifications:
                         # Complete the associated notification
@@ -403,10 +472,10 @@ class CommunicationHandler(ABC):
         """
         logger.debug(f"{self._mcu_name}: Received message: {msg}")
         with self._lock:
-            cmd = self._msgparser.get_cmd(msg)
-            params = self._msgparser.parse(msg)
+            cmd = self.msgparser.get_cmd(msg)
+            params = self.msgparser.parse(msg)
 
-            handler = (cmd, params.get('oid'))
+            handler = (cmd, params.get(self.PARAM["OID"]))
  
             # Check for registered command handlers
             handler = self._response_handlers.get(handler, self._default_handler)
@@ -421,7 +490,7 @@ class CommunicationHandler(ABC):
         """
         logging.warning(f"{self._mcu_name}: Unhandled command")
 
-    def send_message(self, command, expect_ack: bool=False, wait_for_response: bool=False):
+    def send_message(self, command: str, expect_ack: bool=False, wait_for_response: bool=False):
         """
         Sends a command over the connection with optional ACK handling.
 
@@ -444,7 +513,11 @@ class CommunicationHandler(ABC):
                 self._pending_notifications[nid] = completion
 
                 # Send the command with the notification ID
-                full_msg = self._msgparser.create_cmd(f"{command} nid={nid}")
+                sep = " "
+                if ";" in command:
+                    sep = ";"
+                
+                full_msg = self.msgparser.create_cmd(f"{command}{sep}{self.PARAM["NID"]}{nid}")
                 self._send_data(full_msg)
                 logger.debug(f"{self._mcu_name}: Sent message: {full_msg.strip()}")
 
@@ -469,7 +542,7 @@ class CommunicationHandler(ABC):
             retry_delay = 0.01
             while retries > 0:
                 try:
-                    full_msg = self._msgparser.create_cmd(command)
+                    full_msg = self.msgparser.create_cmd(command)
                     self._send_data(full_msg)
                     logger.debug(f"{self._mcu_name}: Sent message: {full_msg.strip()}")
 
@@ -749,7 +822,12 @@ class ArduinoMCU:
             self._comm = SerialHandler(self._reactor, self._name, self._mcu_const, self._port, self._baudrate)
         elif self._commType == 'lan':
             self._comm = NetworkHandler(self._reactor, self._name, self._mcu_const, self._ip, self._port)
-        self.register_response(self.handle_error, "error")
+            
+        self.PARAM = self._comm.msgparser.PARAMETERS
+        self.CMD = self._comm.msgparser.COMMANDS
+        self.RESP = self._comm.msgparser.RESPONSES
+        
+        self.register_response(self.handle_error, "error".encode("utf-8"))
 
         # Register G-code command
         self._gcode.register_mux_command("SEND_ARDUINO", "TARGET", self._name, self.cmd_SEND_ARDUINO, desc=self.cmd_SEND_ARDUINO_help)
@@ -824,7 +902,7 @@ class ArduinoMCU:
 
         logger.debug(f"{self._name}: Sending configuration messages to Arduino MCU...")
         for msg in self._config_messages:
-            # Parse command and params from message
+
             self._comm.send_message(msg, True)                 
 
         # Clear the list after sending
@@ -837,7 +915,7 @@ class ArduinoMCU:
         logger.debug(f"{self._name}: config command: {cmd}")
         # Capture and save all relevant commands that relate to buttons (captured by buttons.py)
         if cmd.startswith("buttons_add"):
-            params = self._comm._msgparser.parse(cmd)
+            params = self._comm.msgparser.parse(cmd)
             if params:
                 oid = int(params.get("oid", 0))
                 pos = int(params.get("pos", 0))
@@ -848,7 +926,7 @@ class ArduinoMCU:
 
         # Capture and save all relevant commands that relate to pulse counter (captured by pulse_counter.py)
         elif cmd.startswith("config_counter"):
-            params = self._comm._msgparser.parse(cmd)
+            params = self._comm.msgparser.parse(cmd)
             if params:
                 oid = int(params.get("oid", 0))
                 pin = params.get("pin", "")
@@ -876,12 +954,12 @@ class ArduinoMCU:
     def get_printer(self):
         return self._printer
 
-    def register_response(self, handler, command: str, oid=None):
+    def register_response(self, handler, command: bytes, oid=None):
         logger.debug(f"{self._name}: Registering response handler: {command}")
         # Check if we need to replace the handlers with the custom one
-        if command == "buttons_state":
+        if command == self.RESP["BUTTONS_STATE"]:
             self._comm.register_response(self._handle_buttons_state, command, oid)
-        elif command == "counter_state":
+        elif command == self.RESP["COUNTER_STATE"]:
             self._comm.register_response(self._handle_counter_state, command, oid)
         else:    
             self._comm.register_response(handler, command, oid)
@@ -911,7 +989,7 @@ class ArduinoMCU:
     def request_move_queue_slot(self):
         pass
 
-    def _handle_buttons_state(self, params):
+    def _handle_buttons_state(self, params: dict):
         oid = int(params['oid'])
         state = int(params['state'])  # 1 = pressed, 0 = released
         if oid not in self._button_instances:
@@ -1050,7 +1128,7 @@ class ArduinoMCU:
             self._printer.invoke_shutdown(f"Lost communication with MCU '{self._name}'")
 
     cmd_SEND_ARDUINO_help = f"Sends a command to the target arduino_mcu."
-    def cmd_SEND_ARDUINO(self, gcmd):
+    def cmd_SEND_ARDUINO(self, gcmd: dict):
         """Sends a command to the target MCU."""
         cmd = gcmd.get('COMMAND', '')
         if not cmd:
@@ -1067,6 +1145,9 @@ class ArduinoMCU:
 class ArduinoMCUPin:
     def __init__(self, mcu: ArduinoMCU, pin_params: dict):
         self._mcu: ArduinoMCU = mcu
+        self.PARAM = self._mcu.PARAM
+        self.CMD = self._mcu.CMD
+        self.RESP = self._mcu.RESP        
         self._name: str = pin_params['pin']
         self._chip_name: str = pin_params['chip_name']
         self._pullup: int = pin_params['pullup']
@@ -1104,14 +1185,14 @@ class ArduinoMCU_digital_out(ArduinoMCUPin):
     def set_digital(self, print_time, value):
         """Set the pin value and send the command to Arduino MCU."""
         self._value = value
-        command = f"set_pin oid={self._oid} value={int(value)}"
+        command = f"{self.CMD["SET_PIN"]} {self.PARAM["OID"]}{self._oid};{self.PARAM["VALUE"]}{value}"
         self._mcu._comm.send_message(command)
         logging.debug(f"sends to {self._mcu._name}: {command}")
 
     def _build_pin_config(self):
         """ Sends the configuration for the digital pin to the Arduino MCU """
         self._oid = self._mcu.create_oid()
-        command = f"config_digital_out oid={self._oid} pin={self._name} pullup={self._pullup} invert={self._invert}"
+        command = f"{self.CMD["CONFIG_DIGITAL_OUT"]} {self.PARAM["OID"]}{self._oid};{self.PARAM["PIN"]}{self._name};{self.PARAM["PULLUP"]}{self._pullup};{self.PARAM["INVERT"]}{self._invert}"
         self._mcu.add_config_cmd(command)
         logging.debug(f"{self._mcu._name}: Build config: {command}")
 
@@ -1140,14 +1221,17 @@ class ArduinoMCU_pwm(ArduinoMCUPin):
         """Set the PWM value and send the command to Arduino MCU."""
         self._value = value
         cycle_time = cycle_time or self._cycle_time
-        command = f"set_pin oid={self._oid} value={value}"
+        command = f"{self.CMD["SET_PIN"]} {self.PARAM["OID"]}{self._oid};{self.PARAM["VALUE"]}{value}"
         self._mcu._comm.send_message(command)
         logging.debug(f"sends to {self._mcu._name}: {command}")
 
     def _build_pin_config(self):
         """ Sends the configuration for the pwm pin to the Arduino MCU """
         self._oid = self._mcu.create_oid()
-        command = f"config_pwm_out oid={self._oid} pin={self._name} cycle_time={self._cycle_time} start_value={self._value}"
+        command = f"{self.CMD["CONFIG_PWM_OUT"]} {self.PARAM["OID"]}{self._oid};
+                                                 {self.PARAM["PIN"]}{self._name};
+                                                 {self.PARAM["CYCLE_TIME"]}{self._cycle_time};
+                                                 {self.PARAM["START_VALUE"]}{self._value}"
         self._mcu.add_config_cmd(command)
         logging.debug(f"{self._mcu._name}: Build config: {command}")
 
@@ -1202,11 +1286,11 @@ class ArduinoMCU_adc(ArduinoMCUPin):
         mcu_adc_max = self._mcu.get_constant('adc_max', parser=float)
         max_adc = self._mcu_sample_count * mcu_adc_max
         self._inv_max_adc = 1.0 / max_adc
-        command = f"config_analog_in oid={self._oid} pin={self._name}"
+        command = f"{self.CMD["CONFIG_ANALOG_IN"]} {self.PARAM["OID"]}{self._oid};{self.PARAM["PIN"]}{self._name}"
         self._mcu.add_config_cmd(command)
         logging.debug(f"{self._mcu._name}: Build config: {command}")
         self._mcu.register_response(self._handle_analog_in_state,
-                                    "analog_in_state", self._oid)
+                                    self.RESP["ANALOG_IN_STATE"], self._oid)
     def _handle_analog_in_state(self, params):
         reactor: Reactor = self._mcu.get_printer().get_reactor()
         last_value = int(params['value']) * self._inv_max_adc 
