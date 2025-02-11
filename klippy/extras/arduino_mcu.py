@@ -40,7 +40,9 @@ class logger:
             logging.debug(f"{timestamp}.{milliseconds} {message}")
 
 class MessageParser:
-    # Default output Commands and Parameter Mapping
+    """Class for parsing messages received from the device."""
+    
+    # Default output Commands, respones and parameter mapping
     # !! If these definitions are changed, klipperComm.h must also be adjusted. !!
     COMMANDS = {
         "CONFIG_ANALOG_IN": b"\x80",
@@ -80,10 +82,8 @@ class MessageParser:
         "CYCLE_TIME": b"\xC1",
         "START_VALUE": b"\xC2",
     }
+    
     def __init__(self, mcu_name: str = ""):
-        """
-        class to parse the data getting from device.
-        """
         self._mcu_name = mcu_name
 
     def _calculate_checksum(self, command: str) -> int:
@@ -152,7 +152,7 @@ class MessageParser:
         if msg:
             # Parse parameters from msg
             byteMsg: bytes = msg.encode("utf-8")
-            params = {}
+            params: dict = {}
             i = 0
             length = len(byteMsg)
             
@@ -189,7 +189,7 @@ class MessageParser:
             msg (str): The base command string to send.
 
         Returns:
-            bytes: The full message string with checksum and newline, encoded as UTF-8.
+            bytes: The full message string with checksum and newline
         """
         checksum = self._calculate_checksum(command)
         return f"{command}*{checksum}\n".encode("utf-8")
@@ -216,9 +216,12 @@ MIN_POLL_TIMEOUT =  250  # ms
 DEFAULT_POLL_TIMEOUT = 1000 # ms (DEFAULT_REPORT_TIME / 2)
 
 class CommunicationHandler(ABC):
-    def __init__(self, reactor: 'Reactor', mcu_name, mcu_const: dict):
+    """
+    Base class for communication handlers.
+    """
+    def __init__(self, reactor: 'Reactor', mcu_name: str, mcu_const: dict):
         """
-        Base class for communication handlers.
+        Initializes the communication handler.
 
         Args:
             reactor (reactor): Event reactor instance.
@@ -227,20 +230,21 @@ class CommunicationHandler(ABC):
         """
         self._reactor = reactor
         self._mcu_name = mcu_name
-        
         self.msgparser = MessageParser(self._mcu_name)
+        
+        # Aliases for easier access to message constants
         self.PARAM = self.msgparser.PARAMETERS
         self.CMD = self.msgparser.COMMANDS
         self.RESP = self.msgparser.RESPONSES
         
-        self._partial_data = ""  # Buffer für unvollständige Nachrichten
+        self._partial_data: str = ""  # Buffer for incomplete messages
 
         # dict for MCU constants
-        self._mcu_const = mcu_const
+        self._mcu_const: dict = mcu_const
 
         self._lock = threading.Lock()
-        self._response_handlers = {}
-        self._running = False
+        self._response_handlers: dict = {}
+        self._running: bool = False
 
         # Threads
         self._read_thread_inst = None
@@ -255,12 +259,12 @@ class CommunicationHandler(ABC):
         self._incoming_queue = Queue()
         self._outgoing_queue = Queue()
 
-        self._poll_timeout  = DEFAULT_POLL_TIMEOUT # ms 
+        self._poll_timeout: int  = DEFAULT_POLL_TIMEOUT # ms 
         
-        self._last_notify_id = 0
-        self._pending_notifications = {}
+        self._last_notify_id: int = 0
+        self._pending_notifications: dict = {}
 
-        self._identify_cmd = self.msgparser.create_cmd("identify")
+        self._identify_cmd: bytes = self.msgparser.create_cmd(f"{self.CMD['IDENTIFY']}")
 
     @abstractmethod
     def _read_data(self) -> str:
@@ -268,7 +272,7 @@ class CommunicationHandler(ABC):
         pass
 
     @abstractmethod
-    def _send_data(self, data):
+    def _send_data(self, data: bytes):
         """Abstract method to send data over the connection."""
         pass
 
@@ -287,7 +291,7 @@ class CommunicationHandler(ABC):
         """Abstract method to clean up the connection."""
         pass
 
-    def _get_identify_data(self):
+    def _get_identify_data(self) -> bool:
         """
         Checks whether the connection is ready by attempting to send an identification request to the device.
 
@@ -517,7 +521,7 @@ class CommunicationHandler(ABC):
                 if ";" in command:
                     sep = ";"
                 
-                full_msg = self.msgparser.create_cmd(f"{command}{sep}{self.PARAM["NID"]}{nid}")
+                full_msg = self.msgparser.create_cmd(f"{command}{sep}{self.PARAM['NID']}{nid}")
                 self._send_data(full_msg)
                 logger.debug(f"{self._mcu_name}: Sent message: {full_msg.strip()}")
 
@@ -574,7 +578,7 @@ class CommunicationHandler(ABC):
                 self._write_condition.notify()  # Wake up the writing thread
                 logger.debug(f"{self._mcu_name}: Queued message: {command}")
 
-    def register_response(self, handler, command, oid=None):
+    def register_response(self, handler, command: bytes, oid=None):
         """
         Registers a handler for a specific command.
 
@@ -590,7 +594,8 @@ class CommunicationHandler(ABC):
                 self._response_handlers[command, oid] = handler
 
 class NetworkHandler(CommunicationHandler):
-    def __init__(self, reactor, mcu_name, mcu_const: dict, hostIp=None, port=45800):
+    """Handles network-based communication with the MCU via TCP sockets."""
+    def __init__(self, reactor: 'Reactor', mcu_name: str, mcu_const: dict, hostIp=None, port: int=45800):
         """
         Initializes the Network handler for TCP communication.
 
@@ -598,16 +603,16 @@ class NetworkHandler(CommunicationHandler):
             reactor (reactor): Event reactor instance (reactor.py).
             mcu_name (str): Name of the MCU to identify.
             mcu_const (dict) : Dictionary for MCU constants that is received when connecting to the MCU for the first time
-            hostIp (str): IP address to bind the server. (default: current IP)
-            port (int): Port number for the server to listen on. (default: 45800)
+            hostIp (str, optional): IP address to bind the server. (default: current IP)
+            port (int, optional): Port number for the server to listen on. (default: 45800)
         """
         super().__init__(reactor, mcu_name, mcu_const)
 
         # Get the current IP if hostIp is not specified
-        self._hostIp = hostIp or self._get_local_ip()
+        self._hostIp: str = hostIp or self._get_local_ip()
 
         # Validate and set the port
-        self._port = self._validate_port(port)
+        self._port: int = self._validate_port(port)
 
         self._server_socket = None
         self._client_socket = None
@@ -615,7 +620,7 @@ class NetworkHandler(CommunicationHandler):
 
         self._selector = selectors.DefaultSelector()
 
-    def _get_local_ip(self):
+    def _get_local_ip(self) -> str:
         """Gets the local IP address of the current machine."""
         try:
             return socket.gethostbyname(socket.gethostname())
@@ -623,7 +628,7 @@ class NetworkHandler(CommunicationHandler):
             logging.error(f"{self._mcu_name}: Failed to get local IP address: {e}")
             return "127.0.0.1"
 
-    def _validate_port(self, port):
+    def _validate_port(self, port: int) -> int:
         """
         Validates the port to ensure it does not conflict with common services.
 
@@ -641,6 +646,9 @@ class NetworkHandler(CommunicationHandler):
         return port
 
     def _setup_connection(self):
+        """
+        Sets up the TCP server connection and waits for a client to connect.
+        """
         self._server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self._server_socket.bind((self._hostIp, self._port))
         self._server_socket.listen(1) # Accept one client at a time
@@ -653,6 +661,9 @@ class NetworkHandler(CommunicationHandler):
         self._selector.register(self._client_socket, selectors.EVENT_READ)
 
     def _cleanup_connection(self):
+        """
+        Cleans up the network connection by closing sockets.
+        """
         if self._client_socket:
             self._client_socket.close()
             self._client_socket = None
@@ -662,7 +673,12 @@ class NetworkHandler(CommunicationHandler):
         logging.info(f"{self._mcu_name}: Server stopped.")
 
     def _read_data(self):
-        """Reads network data using polling."""
+        """
+        Reads incoming data from the network socket using polling.
+
+        Returns:
+            str: The received message as a string, or an empty string if no data is available.
+        """
         if self._client_socket:
             try:
                 events = self._selector.select(timeout=(self._poll_timeout / 1000))
@@ -688,7 +704,13 @@ class NetworkHandler(CommunicationHandler):
                 logging.error(f"{self._mcu_name}: Error when reading the data: {e}")
                 return ""
 
-    def _send_data(self, data):
+    def _send_data(self, data: bytes):
+        """
+        Sends data to the connected client.
+
+        Args:
+            data (bytes): The data to send.
+        """
         if self._client_socket is not None:
             self._client_socket.sendall(data)
     
@@ -709,7 +731,8 @@ class NetworkHandler(CommunicationHandler):
 
 
 class SerialHandler(CommunicationHandler):
-    def __init__(self, reactor, mcu_name, mcu_const: dict, port="", baudrate=115200):
+    """Handles UART communication with the MCU via serial interface."""
+    def __init__(self, reactor: 'Reactor', mcu_name: str, mcu_const: dict, port: str = "", baudrate: int = 115200):
         """
         Initializes the serial handler for UART communication.
 
@@ -721,12 +744,18 @@ class SerialHandler(CommunicationHandler):
             baudrate (int): The baud rate for communication (default: 115200).
         """
         super().__init__(reactor, mcu_name, mcu_const)
-        self._port = port
-        self._baudrate = baudrate
+        self._port: str = port
+        self._baudrate: int = baudrate
         self._serial_dev = None
         self._poll_obj = select.poll()
 
     def _setup_connection(self):
+        """
+        Sets up the serial connection to the MCU.
+
+        Raises:
+            RuntimeError: If the connection cannot be established within 90 seconds.
+        """
         start_time = self._reactor.monotonic()
         while 1:
             try:
@@ -747,6 +776,7 @@ class SerialHandler(CommunicationHandler):
             logging.info(f"{self._mcu_name}: Connected to {self._port} at {self._baudrate} baud.")
             break
     def _cleanup_connection(self):
+        """Closes the serial connection and cleans up resources."""
         if self._serial_dev:
             self._serial_dev.close()
             self._serial_dev = None
@@ -773,11 +803,18 @@ class SerialHandler(CommunicationHandler):
                 self.disconnect()  # Sicherstellen, dass die Verbindung korrekt getrennt wird
                 return ""
 
-    def _send_data(self, data):
+    def _send_data(self, data: bytes):
+        """
+        Sends data to the MCU via the serial port.
+
+        Args:
+            data (bytes): The data to send.
+        """
         if self._serial_dev is not None:
             self._serial_dev.write(data)
     
     def _reset_device_input_buffer(self):
+        """Clears the serial input buffer."""
         if self._serial_dev is not None:
             self._serial_dev.reset_input_buffer()
 
@@ -785,9 +822,9 @@ class ArduinoMCU:
     def __init__(self, config):
         self._printer: Printer = config.get_printer()
         self._reactor: Reactor = self._printer.get_reactor()
-        self._name = config.get_name().split()[-1]
+        self._name: str = config.get_name().split()[-1]
         self._gcode: GCode = cast("GCode", self._printer.lookup_object('gcode'))
-        self._commType = config.get('comm', 'serial')
+        self._commType: str = config.get('comm', 'serial')
         if self._commType == 'lan':
             self._port = config.getint('port', 0) # Default port for network communication
             self._ip = config.get('ip', None)
@@ -796,7 +833,7 @@ class ArduinoMCU:
             self._port = config.get('port', '/dev/ttyUSB0') # Default port for serial
             self._baudrate = config.getint('baud', 115200) # Default baudrate   
         
-        self._debuglevel = config.get('debug', False)
+        self._debuglevel: bool = config.get('debug', False)
         if self._debuglevel:
             logging.getLogger().setLevel(logging.DEBUG) 
 
@@ -805,17 +842,18 @@ class ArduinoMCU:
         self._freq_counter_instances = {} # oid -> FrequencyCounter instances
         self._button_instances = {} # oid -> MCU_buttons instances
 
-        self._is_shutdown = self._is_timeout = False
+        self._is_shutdown: bool = False
+        self._is_timeout: bool = False
         
-        # init Arduino MCU
-        ppins = cast("Pin", self._printer.lookup_object('pins'))
+        # Initialize MCU as a pin device
+        ppins: Pin = cast("Pin", self._printer.lookup_object('pins'))
         ppins.register_chip(f"{self._name}_pin", self) # registers the mcu_name + the suffix '_pin' as a new chip, 
                                                        # so the pin must be specified in the config with {mcu_name}_pin:{pin_name}.
-        self._pins = {}
-        self._oid_count = 0
-        self._config_callbacks = []
+        self._pins: dict = {}
+        self._oid_count: int = 0
+        self._config_callbacks: list = []
 
-        self._mcu_const = {}
+        self._mcu_const: dict = {}
         
         # Initialize communication
         if self._commType == 'serial':
@@ -823,6 +861,7 @@ class ArduinoMCU:
         elif self._commType == 'lan':
             self._comm = NetworkHandler(self._reactor, self._name, self._mcu_const, self._ip, self._port)
             
+        # Import constants for easier reference
         self.PARAM = self._comm.msgparser.PARAMETERS
         self.CMD = self._comm.msgparser.COMMANDS
         self.RESP = self._comm.msgparser.RESPONSES
@@ -831,9 +870,8 @@ class ArduinoMCU:
 
         # Register G-code command
         self._gcode.register_mux_command("SEND_ARDUINO", "TARGET", self._name, self.cmd_SEND_ARDUINO, desc=self.cmd_SEND_ARDUINO_help)
-        
-        self._config_callbacks = []
-       # Register event handlers
+                
+        # Register event handlers
         self._printer.register_event_handler("klippy:firmware_restart", self._firmware_restart)
         self._printer.register_event_handler("klippy:mcu_identify", self._mcu_identify)
         self._printer.register_event_handler("klippy:connect", self._connect)
@@ -883,10 +921,22 @@ class ArduinoMCU:
         return pin
 
     def create_oid(self):
+        """
+        Creates a new unique object identifier (OID).
+
+        Returns:
+            int: The newly created OID.
+        """
         self._oid_count += 1
         return self._oid_count - 1
 
     def register_config_callback(self, cb):
+        """
+        Registers a callback function that will be executed when configuration is applied.
+
+        Args:
+            cb: The callback function.
+        """
         logger.debug(f"{self._name}: Registering config callback: {cb}")
         self._config_callbacks.append(cb)
 
@@ -955,6 +1005,14 @@ class ArduinoMCU:
         return self._printer
 
     def register_response(self, handler, command: bytes, oid=None):
+        """
+        Registers a handler for a specific command.
+
+        Args:
+            handler (callable): The function to handle the command.
+            command (bytes): The command to handle.
+            oid (int, optional): Object ID for the hardware object.
+        """
         logger.debug(f"{self._name}: Registering response handler: {command}")
         # Check if we need to replace the handlers with the custom one
         if command == self.RESP["BUTTONS_STATE"]:
@@ -1185,14 +1243,14 @@ class ArduinoMCU_digital_out(ArduinoMCUPin):
     def set_digital(self, print_time, value):
         """Set the pin value and send the command to Arduino MCU."""
         self._value = value
-        command = f"{self.CMD["SET_PIN"]} {self.PARAM["OID"]}{self._oid};{self.PARAM["VALUE"]}{value}"
+        command = f"{self.CMD['SET_PIN']} {self.PARAM['OID']}{self._oid};{self.PARAM['VALUE']}{value}"
         self._mcu._comm.send_message(command)
         logging.debug(f"sends to {self._mcu._name}: {command}")
 
     def _build_pin_config(self):
         """ Sends the configuration for the digital pin to the Arduino MCU """
         self._oid = self._mcu.create_oid()
-        command = f"{self.CMD["CONFIG_DIGITAL_OUT"]} {self.PARAM["OID"]}{self._oid};{self.PARAM["PIN"]}{self._name};{self.PARAM["PULLUP"]}{self._pullup};{self.PARAM["INVERT"]}{self._invert}"
+        command = f"{self.CMD['CONFIG_DIGITAL_OUT']} {self.PARAM['OID']}{self._oid};{self.PARAM['PIN']}{self._name};{self.PARAM['PULLUP']}{self._pullup};{self.PARAM['INVERT']}{self._invert}"
         self._mcu.add_config_cmd(command)
         logging.debug(f"{self._mcu._name}: Build config: {command}")
 
@@ -1221,17 +1279,17 @@ class ArduinoMCU_pwm(ArduinoMCUPin):
         """Set the PWM value and send the command to Arduino MCU."""
         self._value = value
         cycle_time = cycle_time or self._cycle_time
-        command = f"{self.CMD["SET_PIN"]} {self.PARAM["OID"]}{self._oid};{self.PARAM["VALUE"]}{value}"
+        command = f"{self.CMD['SET_PIN']} {self.PARAM['OID']}{self._oid};{self.PARAM['VALUE']}{value}"
         self._mcu._comm.send_message(command)
         logging.debug(f"sends to {self._mcu._name}: {command}")
 
     def _build_pin_config(self):
         """ Sends the configuration for the pwm pin to the Arduino MCU """
         self._oid = self._mcu.create_oid()
-        command = f"{self.CMD["CONFIG_PWM_OUT"]} {self.PARAM["OID"]}{self._oid};
-                                                 {self.PARAM["PIN"]}{self._name};
-                                                 {self.PARAM["CYCLE_TIME"]}{self._cycle_time};
-                                                 {self.PARAM["START_VALUE"]}{self._value}"
+        command = f"{self.CMD['CONFIG_PWM_OUT']} {self.PARAM['OID']}{self._oid};
+                                                 {self.PARAM['PIN']}{self._name};
+                                                 {self.PARAM['CYCLE_TIME']}{self._cycle_time};
+                                                 {self.PARAM['START_VALUE']}{self._value}"
         self._mcu.add_config_cmd(command)
         logging.debug(f"{self._mcu._name}: Build config: {command}")
 
@@ -1286,7 +1344,7 @@ class ArduinoMCU_adc(ArduinoMCUPin):
         mcu_adc_max = self._mcu.get_constant('adc_max', parser=float)
         max_adc = self._mcu_sample_count * mcu_adc_max
         self._inv_max_adc = 1.0 / max_adc
-        command = f"{self.CMD["CONFIG_ANALOG_IN"]} {self.PARAM["OID"]}{self._oid};{self.PARAM["PIN"]}{self._name}"
+        command = f"{self.CMD['CONFIG_ANALOG_IN']} {self.PARAM['OID']}{self._oid};{self.PARAM['PIN']}{self._name}"
         self._mcu.add_config_cmd(command)
         logging.debug(f"{self._mcu._name}: Build config: {command}")
         self._mcu.register_response(self._handle_analog_in_state,
