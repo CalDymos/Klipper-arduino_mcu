@@ -52,7 +52,6 @@ enum PinReturnType {
 #define DEFAULT_REPORT_TIME 2000 // ms
 struct PinConfig {
   uint8_t type;           // Pin Type 0=Digital OUT 1=PWM 2=Analog IN 3=Digital IN
-  uint8_t retType;        // Return type to Klipper for input pins 0=temp 1=humidity 3=pressure 4=gas 5=freq
   uint32_t cycleTime;     // PWM cycle time (only relevant for PWM)
   uint16_t startValue;    // Start value (only relevant for PWM and Digital Out)
   bool pullUp;            // Pull-up resistor (only for digital input pins)
@@ -72,12 +71,12 @@ uint8_t pinCount = 0;
 // Received message size
 uint8_t recvMsgSize;
 
-void handleConfigPin(const char* msg, int type) {
+void handleConfigPin(const char* params, int type) {
   if (pinCount <= pinConfigurations.getSize()) {
 
-    int pin = atoi(klipperComm.getParamValue(msg, PARAM_PIN));
-    int nid = atoi(klipperComm.getParamValue(msg, PARAM_NID));
-    int reportTime = atoi(klipperComm.getParamValue(msg, PARAM_REPORT_TIME));
+    int pin = atoi(klipperComm.getParamValue(params, PARAM_PIN));
+    int nid = atoi(klipperComm.getParamValue(params, PARAM_NID));
+    int reportTime = atoi(klipperComm.getParamValue(params, PARAM_REPORT_TIME));
     if (reportTime <= 0) reportTime = DEFAULT_REPORT_TIME;
 
     PinConfig config;
@@ -86,34 +85,35 @@ void handleConfigPin(const char* msg, int type) {
     config.lastReportTime = 0;
 
     if (type == PIN_TYPE_DOUT) {
-      config.invert = atoi(klipperComm.getParamValue(msg, PARAM_INVERT));
+      config.invert = atoi(klipperComm.getParamValue(params, PARAM_INVERT));
       pinMode(pin, OUTPUT);
     } else if (type == PIN_TYPE_PWM) {
-      config.cycleTime = atoi(klipperComm.getParamValue(msg, PARAM_CYCLE_TIME));
-      config.startValue = atoi(klipperComm.getParamValue(msg, PARAM_START_VALUE));
+      config.cycleTime = atoi(klipperComm.getParamValue(params, PARAM_CYCLE_TIME));
+      config.startValue = atoi(klipperComm.getParamValue(params, PARAM_START_VALUE));
       pinMode(pin, OUTPUT);
       analogWrite(pin, config.startValue);
     } else if (type == PIN_TYPE_AIN || type == PIN_TYPE_DIN) {
-      config.pullUp = atoi(klipperComm.getParamValue(msg, PARAM_PULLUP));
+      config.pullUp = atoi(klipperComm.getParamValue(params, PARAM_PULLUP));
       pinMode(pin, config.pullUp ? INPUT_PULLUP : INPUT);
     }
 
     pinConfigurations[pin](pin, config);
     pinCount++;
-    snprintf(klipperComm.msgBuffer, MAX_BUFFER_LEN, "%c %c%u", RE_ACK, PARAM_NID, nid);
+    snprintf(klipperComm.msgBuffer, MAX_BUFFER_LEN, "%c %c%u", RESP_ACK, PARAM_NID, nid);
 
   } else {
-    strcpy(klipperComm.msgBuffer, "error: Pin list full");
+    snprintf(klipperComm.msgBuffer, MAX_BUFFER_LEN, "%c %c%s", RESP_ERROR_MSG, PARAM_VALUE, "Pin list full");
   }
   klipperComm.sendResponse();
 }
 
-void handleSetPin(const char* command) {
-  int pin = atoi(klipperComm.getParamValue(command, PARAM_PIN));
-  int value = atoi(klipperComm.getParamValue(command, PARAM_VALUE));
+void handleSetPin(const char* params) {
+  int pin = atoi(klipperComm.getParamValue(params, PARAM_PIN));
+  int value = atoi(klipperComm.getParamValue(params, PARAM_VALUE));
 
   if (pinConfigurations.indexOf(pin) == pinConfigurations.getSize()) {
-    klipperComm.sendResponse("error: Pin list full");
+    snprintf(klipperComm.msgBuffer, MAX_BUFFER_LEN, "%c %c%s", RESP_ERROR_MSG, PARAM_VALUE, "Pin list full");
+    klipperComm.sendResponse();
     return;
   }
 
@@ -126,11 +126,19 @@ void handleSetPin(const char* command) {
   }
 }
 
+void handleRestart(const char* params) {
+ // handle Restart of MCU
+}
+
+void handleUserdefined(const char* params) {
+  // User-defined commands can be processed here.
+}
+
 void sendWatchdogMsg() {
   // Send watchdog message every 5 seconds
   unsigned long currentTime = millis();
   if (currentTime - lastWatchdogTime >= WATCHDOG_INTERVAL) {
-    snprintf(klipperComm.msgBuffer, MAX_BUFFER_LEN, "%c %c1", RE_WATCHDOG, PARAM_MCU_WATCHDOG);
+    snprintf(klipperComm.msgBuffer, MAX_BUFFER_LEN, "%c %c1", RESP_WATCHDOG, PARAM_MCU_WATCHDOG);
     klipperComm.sendResponse();
     lastWatchdogTime = currentTime;
   }
@@ -152,11 +160,11 @@ void sendPeriodicReports() {
       // Send the value based on the pin type
       if (config.type == PIN_TYPE_AIN) {
         int analogValue = analogRead(pin);
-        snprintf(klipperComm.msgBuffer, MAX_BUFFER_LEN, "%c %c%u;%c%u", RE_ANALOG_IN_STATE, PARAM_PIN, pin, PARAM_VALUE, analogValue);
+        snprintf(klipperComm.msgBuffer, MAX_BUFFER_LEN, "%c %c%u;%c%u", RESP_ANALOG_IN_STATE, PARAM_PIN, pin, PARAM_VALUE, analogValue);
         klipperComm.sendResponse();
       } else if (config.type == PIN_TYPE_DIN) {
         int digitalValue = digitalRead(pin);
-        snprintf(klipperComm.msgBuffer, MAX_BUFFER_LEN, "%c %c%u;%c%u", RE_BUTTONS_STATE, PARAM_PIN, pin, PARAM_VALUE, digitalValue);
+        snprintf(klipperComm.msgBuffer, MAX_BUFFER_LEN, "%c %c%u;%c%u", RESP_BUTTONS_STATE, PARAM_PIN, pin, PARAM_VALUE, digitalValue);
         klipperComm.sendResponse();
       }
 
@@ -178,19 +186,21 @@ void setup() {
 
 
   // Register commands
-  klipperComm.registerCommand(CMD_CONFIG_ANALOG_IN, [](const char* cmd) {
-    handleConfigPin(cmd, PIN_TYPE_AIN);
+  klipperComm.registerCommand(CMD_CONFIG_ANALOG_IN, [](const char* params) {
+    handleConfigPin(params, PIN_TYPE_AIN);
   });
-  klipperComm.registerCommand(CMD_CONFIG_PWM_OUT, [](const char* cmd) {
-    handleConfigPin(cmd, PIN_TYPE_PWM);
+  klipperComm.registerCommand(CMD_CONFIG_PWM_OUT, [](const char* params) {
+    handleConfigPin(params, PIN_TYPE_PWM);
   });
-  klipperComm.registerCommand(CMD_CONFIG_DIGITAL_OUT, [](const char* cmd) {
-    handleConfigPin(cmd, PIN_TYPE_DOUT);
+  klipperComm.registerCommand(CMD_CONFIG_DIGITAL_OUT, [](const char* params) {
+    handleConfigPin(params, PIN_TYPE_DOUT);
   });
-  klipperComm.registerCommand(CMD_CONFIG_BUTTONS, [](const char* cmd) {
-    handleConfigPin(cmd, PIN_TYPE_DIN);
+  klipperComm.registerCommand(CMD_CONFIG_BUTTONS, [](const char* params) {
+    handleConfigPin(params, PIN_TYPE_DIN);
   });
   klipperComm.registerCommand(CMD_SET_PIN, handleSetPin);
+  klipperComm.registerCommand(CMD_RESTART, handleRestart);
+  klipperComm.registerCommand(CMD_USERDEFINED, handleUserdefined);
 }
 
 void loop() {

@@ -141,7 +141,7 @@ class MessageParser:
             return msg[0]
         return ""     
              
-    def parse(self, msg: str) -> dict:
+    def parse(self, msg: str, is_txt_msg: bool = False) -> dict:
         """
         Parses a valid message, and extracts parameters.
 
@@ -153,35 +153,46 @@ class MessageParser:
         """
         logger.debug(f"{self._mcu_name}: Received msg to parse: {msg}")
 
-        if msg:
-            # Parse parameters from msg
-            byteMsg: bytes = msg.encode("utf-8")
-            params: dict = {}
-            i = 0
-            length = len(byteMsg)
-            
-            while i < length:
-                key = byteMsg[i:i+1] # Read parameter byte
-                i += 1
-                value = bytearray()
+        if is_txt_msg:
+            if msg:
+                # Parse parameters from msg
+                parts = msg.split()
+                params = {}
+                for part in parts:
+                    if "=" in part:
+                        key, value = part.split("=")
+                        params[key] = value
+                return params
+        else:
+            if msg:
+                # Parse parameters from msg
+                byteMsg: bytes = msg.encode("utf-8")
+                params: dict = {}
+                i = 0
+                length = len(byteMsg)
                 
-                #  Read value until the next parameter or end of message
-                while i < length and byteMsg[i:i+1] != b";":
-                    value.append(byteMsg[i])
-                    i += 1   
+                while i < length:
+                    key = byteMsg[i:i+1] # Read parameter byte
+                    i += 1
+                    value = bytearray()
+                    
+                    #  Read value until the next parameter or end of message
+                    while i < length and byteMsg[i:i+1] != b";":
+                        value.append(byteMsg[i])
+                        i += 1   
 
-                # Skip ";" if present
-                if i < length and byteMsg[i:i+1] == b";":
-                    i += 1       
-                                              
-                try:
-                    decoded_value = value.decode("utf-8")
-                except UnicodeDecodeError:
-                    decoded_value = bytes(value)
+                    # Skip ";" if present
+                    if i < length and byteMsg[i:i+1] == b";":
+                        i += 1       
+                                                
+                    try:
+                        decoded_value = value.decode("utf-8")
+                    except UnicodeDecodeError:
+                        decoded_value = bytes(value)
 
-                params[key] = decoded_value
-                
-            return params
+                    params[key] = decoded_value
+                    
+                return params            
 
         return {}
     
@@ -206,13 +217,14 @@ class MessageParser:
             data (str): The (raw) message string received.
 
         Returns:
-            str : The command if valid, otherwise empty str.
+            str : The command, otherwise empty str.
         """
 
         if data:
+            if " " not in data:
+                return data # There is only one command, without parameters
             cmd = data.split(" ", 1)[0]
-            return cmd.rstrip(":") #removes trailing ':' (if exists) and return command byte
-
+            return cmd
         return ""
 
 MAX_POLL_TIMEOUT =  2500 # ms  (WATCHDOG_INTERVAL / 2)
@@ -470,25 +482,32 @@ class CommunicationHandler(ABC):
 
             except Exception as e:
                 logging.error(f"{self._mcu_name}: Error processing message: {e}")
-
+           
     def _handle_message(self, msg: str):
         """
         Processes incoming messages and dispatches them to the appropriate handler.
 
         Args:
-            message (str): The received validated message.
+            message (str): The received validated message (without crc).
         """
         logger.debug(f"{self._mcu_name}: Received message: {msg}")
         with self._lock:
             cmd = self.msgparser.get_cmd(msg)
-            params = self.msgparser.parse(msg)
+            user_params = cmd.endswith(":")
+            params: dict = {}
+            
+            if user_params:
+                cmd = cmd.rstrip(":")
+                params = self.msgparser.parse(msg,True)
+            else:
+                params = self.msgparser.parse(msg)        
+            
+            handler = (cmd, params.get(self.PARAM["OID"], None))
 
-            handler = (cmd, params.get(self.PARAM["OID"]))
- 
             # Check for registered command handlers
             handler = self._response_handlers.get(handler, self._default_handler)
             handler(params)
-
+            
     def _default_handler(self, params: dict):
         """
         Default handler for unrecognized commands.
@@ -973,23 +992,27 @@ class ArduinoMCU:
         logger.debug(f"{self._name}: config command: {cmd}")
         # Capture and save all relevant commands that relate to buttons (captured by buttons.py)
         if cmd.startswith("buttons_add"):
-            params = self._comm.msgparser.parse(cmd)
+            params = self._comm.msgparser.parse(cmd, True)
             if params:
                 oid = int(params.get("oid", 0))
                 pos = int(params.get("pos", 0))
                 pin = params.get("pin", "")
                 pull_up = int(params.get("pull_up", 0))
-                snd_msg = f"config_buttons oid={oid} pos={pos} pin={pin} pullup={pull_up}"
+                snd_msg = f"{self.CMD['CONFIG_BUTTONS']} {self.PARAM['OID']}{oid};
+                                                         {self.PARAM['PIN']}{pin};
+                                                         {self.PARAM['PULLUP']}{pull_up}"
                 self._config_messages.append(snd_msg)
 
         # Capture and save all relevant commands that relate to pulse counter (captured by pulse_counter.py)
         elif cmd.startswith("config_counter"):
-            params = self._comm.msgparser.parse(cmd)
+            params = self._comm.msgparser.parse(cmd, True)
             if params:
                 oid = int(params.get("oid", 0))
                 pin = params.get("pin", "")
                 pull_up = int(params.get("pull_up", 0))
-                snd_msg = f"config_counter oid={oid} pin={pin} pullup={pull_up}"
+                snd_msg = f"{self.CMD['CONFIG_COUNTER']} {self.PARAM['OID']}{oid};
+                                                         {self.PARAM['PIN']}{pin};
+                                                         {self.PARAM['PULLUP']}{pull_up}"
                 self._config_messages.append(snd_msg)             
         else:
             self._config_messages.append(cmd)
@@ -1012,7 +1035,7 @@ class ArduinoMCU:
     def get_printer(self):
         return self._printer
 
-    def register_response(self, handler, command: bytes, oid=None):
+    def register_response(self, handler, command, oid=None):
         """
         Registers a handler for a specific command.
 
@@ -1023,10 +1046,10 @@ class ArduinoMCU:
         """
         logger.debug(f"{self._name}: Registering response handler: {command}")
         # Check if we need to replace the handlers with the custom one
-        if command == self.RESP["BUTTONS_STATE"]:
-            self._comm.register_response(self._handle_buttons_state, command, oid)
-        elif command == self.RESP["COUNTER_STATE"]:
-            self._comm.register_response(self._handle_counter_state, command, oid)
+        if command == "buttons_state":
+            self._comm.register_response(self._handle_buttons_state, self.RESP["BUTTONS_STATE"], oid)
+        elif command == "counter_state":
+            self._comm.register_response(self._handle_counter_state, self.RESP["COUNTER_STATE"], oid)
         else:    
             self._comm.register_response(handler, command, oid)
 
@@ -1056,8 +1079,8 @@ class ArduinoMCU:
         pass
 
     def _handle_buttons_state(self, params: dict):
-        oid = int(params['oid'])
-        state = int(params['state'])  # 1 = pressed, 0 = released
+        oid = int(params[self.PARAM['OID']])
+        state = int(params[self.PARAM['VALUE']])  # 1 = pressed, 0 = released
         if oid not in self._button_instances:
             logging.warning(f"{self._name}: Received button_state for unknown oid {oid}")
             return  
@@ -1083,8 +1106,8 @@ class ArduinoMCU:
                 break # cancel if button matches
 
     def _handle_counter_state(self, params):
-        oid = int(params['oid'])
-        freq = float(params['freq'])
+        oid = int(params[self.PARAM['OID']])
+        freq = float(params[self.PARAM['VALUE']]) # frequency
         if oid not in self._freq_counter_instances:
             logging.warning(f"{self._name}: Received counter_state for unknown oid {oid}")
             return
@@ -1092,7 +1115,7 @@ class ArduinoMCU:
         # Set the frequency directly, as the MCU (must) return(s) the frequency directly.
         freq_counter: FrequencyCounter = self._freq_counter_instances[oid]
         freq_counter._freq = freq
-
+        
     def _mcu_identify(self):
 
         logging.info(f"{self._name}: Establishing connection...")
@@ -1203,13 +1226,13 @@ class ArduinoMCU:
         # Send the command to the Arduino
         self._comm.send_message(f"{self.CMD['USERDEFINED']} {cmd}")
     
-    def handle_ERROR_MSG(self, data):
+    def handle_ERROR_MSG(self, params):
         """Handle error messages from the Arduino."""
-        self._respond_error(f"Error from Arduino: {data}")
+        self._respond_error(f"Error from Arduino: {params[self.PARAM['VALUE']]}")
     
-    def handle_USERDEFINED_DATA(self, data):
-        pass
-        
+    def handle_USERDEFINED_DATA(self, params):
+        for param in params:
+            self._userdefined_data[param] = params[param]         
         
 class ArduinoMCUPin:
     def __init__(self, mcu: ArduinoMCU, pin_params: dict):

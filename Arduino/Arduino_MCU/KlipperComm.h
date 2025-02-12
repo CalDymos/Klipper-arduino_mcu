@@ -29,13 +29,17 @@ extern const char* MCU_CHIP;    // MCU chip
 #define CMD_CONFIG_BUTTONS     "\x83"
 #define CMD_SET_PIN            "\x84"
 #define CMD_IDENTIFY           "\x85"
+#define CMD_RESTART            "\x86"
+#define CMD_USERDEFINED        "\x9F"
 
 // Responses
-#define RE_ACK                 "\xA0"
-#define RE_WATCHDOG            "\xA1"
-#define RE_ANALOG_IN_STATE     "\xA2"
-#define RE_BUTTONS_STATE       "\xA3"
-#define RE_COUNTER_STATE       "\xA4"
+#define RESP_ACK               "\xA0"
+#define RESP_WATCHDOG          "\xA1"
+#define RESP_ANALOG_IN_STATE   "\xA2"
+#define RESP_BUTTONS_STATE     "\xA3"
+#define RESP_COUNTER_STATE     "\xA4"
+#define RESP_ERROR_MSG         "\xAE"
+#define RESP_USERDEFINED_DATA  "\xAF"
 
 // Parameters
 #define PARAM_MCU_WATCHDOG     "\xB0"
@@ -156,7 +160,8 @@ public:
         } else if (len + 6 < sizeof(msgBuffer)) { // If 'response' is a different string, format normally
             snprintf(msgBuffer, sizeof(msgBuffer), "%s*%d\n", response, checksum);
         } else {
-            sendResponse("error: message too long");
+            snprintf(msgBuffer, MAX_BUFFER_LEN, "%c %c%s", RESP_ERROR_MSG, PARAM_VALUE, "message too long");
+            sendResponse();
             return;          
         }
 
@@ -231,7 +236,8 @@ public:
         } else if (len + 6 < sizeof(msgBuffer)) { // If 'response' is a different string, format normally
             snprintf(msgBuffer, sizeof(msgBuffer), "%s*%d\n", response, checksum);
         } else {
-            sendResponse("error: message too long");
+            snprintf(msgBuffer, MAX_BUFFER_LEN, "%c %c%s", RESP_ERROR_MSG, PARAM_VALUE, "message too long");
+            sendResponse();
             return;          
         }
 
@@ -299,7 +305,8 @@ public:
         } else if (len + 6 < sizeof(msgBuffer)) { // If 'response' is a different string, format normally
             snprintf(msgBuffer, sizeof(msgBuffer), "%s*%d\n", response, checksum);
         } else {
-            sendResponse("error: message too long");
+            snprintf(msgBuffer, MAX_BUFFER_LEN, "%c %c%s", RESP_ERROR_MSG, PARAM_VALUE, "message too long");
+            sendResponse();
             return;          
         }
 
@@ -327,12 +334,13 @@ public:
                     return;
                 }
             }
-            sendResponse("error: Command list full");
+            snprintf(msgBuffer, MAX_BUFFER_LEN, "%c %c%s", RESP_ERROR_MSG, PARAM_VALUE, "Command list full");
+            sendResponse();
         }
     }
 
-    char* getParamValue(const char* msg, const char* paramKey) {
-        char* start = strstr(msg, paramKey);
+    char* getParamValue(const char* params, const char* paramKey) {
+        char* start = strstr(params, paramKey);
         if (!start) return 0;  // Parameter not found
         start += 1; // Move past paramKey
         char* end = strchr(start, ';');
@@ -347,7 +355,8 @@ public:
     void handleCommand() {
         char* splitPtr = strchr(msgBuffer, '*');
         if (!splitPtr) {
-            sendResponse("error: no checksum");
+            snprintf(msgBuffer, MAX_BUFFER_LEN, "%c %c%s", RESP_ERROR_MSG, PARAM_VALUE, "no checksum");
+            sendResponse();
             return;
         }
 
@@ -357,14 +366,16 @@ public:
         char* endPtr;
         int checksum = strtol(checksumStr, &endPtr, 10);
         if (endPtr == checksumStr) { 
-            sendResponse("error: invalid checksum");
+            snprintf(msgBuffer, MAX_BUFFER_LEN, "%c %c%s", RESP_ERROR_MSG, PARAM_VALUE, "invalid checksum");
+            sendResponse();
             return;
         }
 
         msgBuffer[splitIndex] = '\0'; // Separate main message in the message buffer
 
         if (checksum != calculateChecksum(msgBuffer)) {
-            sendResponse("error: checksum mismatch");
+            snprintf(msgBuffer, MAX_BUFFER_LEN, "%c %c%s", RESP_ERROR_MSG, PARAM_VALUE, "checksum mismatch");
+            sendResponse();
             return;
         }
       
@@ -389,7 +400,8 @@ public:
             }
         }
 
-        sendResponse("error: unknown command");
+        snprintf(msgBuffer, MAX_BUFFER_LEN, "%c %c%s", RESP_ERROR_MSG, PARAM_VALUE, "unknown command");
+        sendResponse();
     }
 };
 
