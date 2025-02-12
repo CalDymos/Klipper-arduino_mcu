@@ -51,6 +51,8 @@ class MessageParser:
         "CONFIG_BUTTONS": b"\x83",
         "SET_PIN": b"\x84",
         "IDENTIFY": b"\x85",
+        "RESTART": b"\x86",
+        "USERDEFINED": b"\x9F"
     }
 
     RESPONSES = {
@@ -59,6 +61,8 @@ class MessageParser:
         "ANALOG_IN_STATE": b"\xA2",
         "BUTTONS_STATE": b"\xA3",
         "COUNTER_STATE": b"\xA4",
+        "ERROR_MSG": b"\xAE",
+        "USERDEFINED_DATA": b"\xAF"
     }
 
     PARAMETERS = {
@@ -855,6 +859,9 @@ class ArduinoMCU:
 
         self._mcu_const: dict = {}
         
+        # Dictionary for user-defined data returned by the MCU on sending a user-defined command with 'SEND_ARDUINO'.
+        self._userdefined_data: dict = {}
+        
         # Initialize communication
         if self._commType == 'serial':
             self._comm = SerialHandler(self._reactor, self._name, self._mcu_const, self._port, self._baudrate)
@@ -866,9 +873,10 @@ class ArduinoMCU:
         self.CMD = self._comm.msgparser.COMMANDS
         self.RESP = self._comm.msgparser.RESPONSES
         
-        self.register_response(self.handle_error, "error".encode("utf-8"))
+        self.register_response(self.handle_ERROR_MSG, self.RESP['ERROR_MSG'])
+        self.register_response(self.handle_USERDEFINED_DATA, self.RESP['USERDEFINED_DATA'])
 
-        # Register G-code command
+        # Register G-code command to send user-defined commands to the MCU
         self._gcode.register_mux_command("SEND_ARDUINO", "TARGET", self._name, self.cmd_SEND_ARDUINO, desc=self.cmd_SEND_ARDUINO_help)
                 
         # Register event handlers
@@ -1110,7 +1118,7 @@ class ArduinoMCU:
             'mcu_constants': {
                 'CLOCK_FREQ': self.get_constant('freq'),
                 'MCU': self.get_constant('chip'),
-                #'ADC_MAX': 1023,
+                'ADC_MAX': self.get_constant('adc_max'),
                 #'PWM_MAX': 255,
             },
             'last_stats': {
@@ -1126,9 +1134,9 @@ class ArduinoMCU:
             'pins': {
                 name: pin.get_status(eventtime)
                     for name, pin in self._pins.items()
-            }
+            },
+            'userdata': self._userdefined_data
         }
-        #logging.debug(f"get_status() is called {status}")
         return status
     
     def _respond_error(self, msg:str , exception=False):
@@ -1160,7 +1168,7 @@ class ArduinoMCU:
     def _firmware_restart(self):
         # Attempt reset via reset command
         logging.info("%s: Attempting Arduino MCU reset command", self._name)
-        self._comm.send_message("restart")
+        self._comm.send_message(f"{self.CMD['RESTART']}")
         self._reactor.pause(self._reactor.monotonic() + 0.015)
         self._disconnect()
 
@@ -1193,11 +1201,14 @@ class ArduinoMCU:
             self._respond_error("COMMAND parameter is required", True)
                 
         # Send the command to the Arduino
-        self._comm.send_message(cmd)
+        self._comm.send_message(f"{self.CMD['USERDEFINED']} {cmd}")
     
-    def handle_error(self, data):
+    def handle_ERROR_MSG(self, data):
         """Handle error messages from the Arduino."""
         self._respond_error(f"Error from Arduino: {data}")
+    
+    def handle_USERDEFINED_DATA(self, data):
+        pass
         
         
 class ArduinoMCUPin:
