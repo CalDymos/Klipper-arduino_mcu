@@ -3,12 +3,12 @@
 
 const char* MCU_NAME = "airfilter";        // mcu name
 const char* MCU_FIRMWARE_VERSION = "1.0";  // Version
-const char* MCU_ADC_MAX = "1023";            // ADC resolution (default 10Bit)
-const char* MCU_ADC_SAMPLE_COUNT = "1";      // Totals of the measured values that are sent in summary form (for analog inputs)
-const char* MCU_CHIP = "ATmega328P";         // MCU chip
+const char* MCU_ADC_MAX = "1023";          // ADC resolution (default 10Bit)
+const char* MCU_ADC_SAMPLE_COUNT = "1";    // Totals of the measured values that are sent in summary form (for analog inputs)
+const char* MCU_CHIP = "ATmega328P";       // MCU chip
 
-#define MAX_CMDS 6                  // Max number of commands processed by the MCU (handlers)
-#define MAX_PIN_CONFIGURATIONS 10   // Max number of pin configurations
+#define MAX_CMDS 8                 // Max number of commands processed by the MCU (handlers)
+#define MAX_PIN_CONFIGURATIONS 10  // Max number of pin configurations
 
 #include "KlipperComm.h"
 
@@ -41,27 +41,27 @@ enum PinType {
 };
 
 enum PinReturnType {
-  RETURN_TYPE_TEMP,   // temperature (°C)
-  RETURN_TYPE_HUM,    // humidity (%)
-  RETURN_TYPE_PRES,   // pressure (hPa)
-  RETURN_TYPE_GAS,    // gas 
-  RETURN_TYPE_FREQ    // frequency (Hz)
+  RETURN_TYPE_TEMP,  // temperature (°C)
+  RETURN_TYPE_HUM,   // humidity (%)
+  RETURN_TYPE_PRES,  // pressure (hPa)
+  RETURN_TYPE_GAS,   // gas
+  RETURN_TYPE_FREQ   // frequency (Hz)
 };
 
 // pin configurations
-#define DEFAULT_REPORT_TIME 2000 // ms
+#define DEFAULT_REPORT_TIME 2000  // ms
 struct PinConfig {
-  uint8_t type;           // Pin Type 0=Digital OUT 1=PWM 2=Analog IN 3=Digital IN
-  uint32_t cycleTime;     // PWM cycle time (only relevant for PWM)
-  uint16_t startValue;    // Start value (only relevant for PWM and Digital Out)
-  bool pullUp;            // Pull-up resistor (only for digital input pins)
-  bool invert;            // Inverted logic (only for digital out pins)
-  uint32_t reportTime;    // report interval in milliseconds
-  uint32_t lastReportTime;// Last time the value was sent
+  uint8_t type;             // Pin Type 0=Digital OUT 1=PWM 2=Analog IN 3=Digital IN
+  uint32_t cycleTime;       // PWM cycle time (only relevant for PWM)
+  uint16_t startValue;      // Start value (only relevant for PWM and Digital Out)
+  bool pullUp;              // Pull-up resistor (only for digital input pins)
+  bool invert;              // Inverted logic (only for digital out pins)
+  uint32_t reportTime;      // report interval in milliseconds
+  uint32_t lastReportTime;  // Last time the value was sent
 };
 
 // watchdog definitions
-#define WATCHDOG_INTERVAL 5000 // ms
+#define WATCHDOG_INTERVAL 5000       // ms
 unsigned long lastWatchdogTime = 0;  // Speichert die letzte Sendezeit
 
 // Map for pin configurations
@@ -127,15 +127,22 @@ void handleSetPin(const char* params) {
 }
 
 void handleRestart(const char* params) {
- // handle Restart of MCU
+  klipperComm.isConnected = false;
+  // handle Restart of MCU
 }
 
 void handleUserdefined(const char* params) {
   // User-defined commands can be processed here.
+  // use option userParams in getParamValue => klipperComm.getParamValue(params, "Pin", true);
 }
 
+/*
+ * Send watchdog message every 5 seconds to klipper
+ *
+ */
 void sendWatchdogMsg() {
-  // Send watchdog message every 5 seconds
+  if (!klipperComm.isConnected) return;  // If no connection → cancel
+  
   unsigned long currentTime = millis();
   if (currentTime - lastWatchdogTime >= WATCHDOG_INTERVAL) {
     snprintf(klipperComm.msgBuffer, MAX_BUFFER_LEN, "%c %c1", RESP_WATCHDOG, PARAM_MCU_WATCHDOG);
@@ -145,6 +152,8 @@ void sendWatchdogMsg() {
 }
 
 void sendPeriodicReports() {
+  if (!klipperComm.isConnected) return;  // If no connection → cancel
+
   unsigned long currentTime = millis();
 
   // Iterate over the registered pins
